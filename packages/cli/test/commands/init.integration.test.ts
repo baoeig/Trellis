@@ -51,6 +51,10 @@ import { VERSION } from "../../src/constants/version.js";
 import { DIR_NAMES, FILE_NAMES, PATHS } from "../../src/constants/paths.js";
 import { collectPlatformTemplates } from "../../src/configurators/index.js";
 import { computeHash } from "../../src/utils/template-hash.js";
+import {
+  COPILOT_INSTRUCTIONS_PATH,
+  getCopilotInstructions,
+} from "../../src/templates/copilot/index.js";
 import { execSync } from "node:child_process";
 
 // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -102,12 +106,11 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".gemini"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".qoder"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".codebuddy"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, ".windsurf", "workflows"))).toBe(
-      false,
-    );
+    expect(fs.existsSync(path.join(tmpDir, ".devin", "workflows"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".github", "copilot"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".factory"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".pi"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".kimi-code"))).toBe(false);
 
     // Root files
     expect(fs.existsSync(path.join(tmpDir, "AGENTS.md"))).toBe(true);
@@ -144,6 +147,19 @@ describe("init() integration", () => {
     ).toBe(true);
   });
 
+  it("#1a writes .gitattributes with the journal merge=union rule (#415)", async () => {
+    await init({ yes: true });
+
+    const gitattributes = fs.readFileSync(
+      path.join(tmpDir, ".gitattributes"),
+      "utf-8",
+    );
+    expect(gitattributes).toContain(
+      ".trellis/workspace/*/journal-*.md merge=union",
+    );
+    expect(gitattributes).not.toContain("index.md merge=union");
+  });
+
   it("#1b does not print the promotional pain-point block", async () => {
     await init({ yes: true });
 
@@ -171,12 +187,11 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".gemini"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".qoder"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".codebuddy"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, ".windsurf", "workflows"))).toBe(
-      false,
-    );
+    expect(fs.existsSync(path.join(tmpDir, ".devin", "workflows"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".github", "copilot"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".factory"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".pi"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".kimi-code"))).toBe(false);
     expect(
       fs.existsSync(
         path.join(tmpDir, ".claude", "skills", "trellis-meta", "SKILL.md"),
@@ -197,11 +212,10 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".gemini"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".qoder"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".codebuddy"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, ".windsurf", "workflows"))).toBe(
-      false,
-    );
+    expect(fs.existsSync(path.join(tmpDir, ".devin", "workflows"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".github", "copilot"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".pi"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".kimi-code"))).toBe(false);
   });
 
   it("#3b codex platform creates skills plus .codex assets", async () => {
@@ -336,19 +350,33 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".gemini"))).toBe(false);
   });
 
-  it("#3f windsurf platform creates .windsurf/workflows", async () => {
-    await init({ yes: true, windsurf: true });
+  it("#3f devin platform creates .devin/workflows", async () => {
+    await init({ yes: true, devin: true });
 
-    expect(fs.existsSync(path.join(tmpDir, ".windsurf", "workflows"))).toBe(
-      true,
-    );
+    expect(fs.existsSync(path.join(tmpDir, ".devin", "workflows"))).toBe(true);
     expect(
       fs.existsSync(
-        path.join(tmpDir, ".windsurf", "workflows", "trellis-start.md"),
+        path.join(tmpDir, ".devin", "workflows", "trellis-start.md"),
       ),
     ).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".cursor"))).toBe(false);
+  });
+
+  it("#3f-alias deprecated --windsurf still configures Devin (.devin/workflows)", async () => {
+    // Windsurf was renamed to Devin; --windsurf remains a deprecated alias.
+    await init({ yes: true, windsurf: true });
+
+    expect(fs.existsSync(path.join(tmpDir, ".devin", "workflows"))).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".devin", "workflows", "trellis-start.md"),
+      ),
+    ).toBe(true);
+    // Should NOT write the old .windsurf/ directory.
+    expect(fs.existsSync(path.join(tmpDir, ".windsurf", "workflows"))).toBe(
+      false,
+    );
   });
 
   it("#3g qoder platform creates .qoder/commands + .qoder/skills", async () => {
@@ -433,6 +461,14 @@ describe("init() integration", () => {
     expect(
       fs.existsSync(path.join(tmpDir, ".github", "hooks", "trellis.json")),
     ).toBe(true);
+    const copilotInstructionsPath = path.join(
+      tmpDir,
+      ...COPILOT_INSTRUCTIONS_PATH.split("/"),
+    );
+    expect(fs.existsSync(copilotInstructionsPath)).toBe(true);
+    expect(fs.readFileSync(copilotInstructionsPath, "utf-8")).toBe(
+      getCopilotInstructions(),
+    );
 
     const hashFile = path.join(
       tmpDir,
@@ -448,6 +484,7 @@ describe("init() integration", () => {
     expect(trackedPaths).not.toContain(".github/prompts/start.prompt.md");
     expect(trackedPaths).toContain(".github/prompts/finish-work.prompt.md");
     expect(trackedPaths).toContain(".github/prompts/continue.prompt.md");
+    expect(trackedPaths).toContain(COPILOT_INSTRUCTIONS_PATH);
     expect(trackedPaths).toContain(".github/copilot/hooks.json");
     expect(trackedPaths).toContain(".github/hooks/trellis.json");
 
@@ -514,7 +551,7 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".pi", "settings.json"))).toBe(true);
     expect(
       fs.existsSync(path.join(tmpDir, ".pi", "prompts", "trellis-start.md")),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       fs.existsSync(
         path.join(tmpDir, ".pi", "prompts", "trellis-finish-work.md"),
@@ -525,7 +562,7 @@ describe("init() integration", () => {
     ).toBe(true);
     expect(
       fs.existsSync(
-        path.join(tmpDir, ".pi", "skills", "trellis-check", "SKILL.md"),
+        path.join(tmpDir, ".agents", "skills", "trellis-check", "SKILL.md"),
       ),
     ).toBe(true);
     expect(
@@ -558,6 +595,282 @@ describe("init() integration", () => {
     }
     const expectedPiPaths = [...piTemplates.keys()];
     expect(trackedPaths).toEqual(expect.arrayContaining(expectedPiPaths));
+  });
+
+  it("#3m kimi platform creates shared skills and .kimi-code skills", async () => {
+    await init({ yes: true, kimi: true });
+
+    // Shared workflow + bundled skills → .agents/skills/
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".agents", "skills", "trellis-check", "SKILL.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".agents", "skills", "trellis-meta", "SKILL.md"),
+      ),
+    ).toBe(true);
+
+    // Kimi-private skills: commands-as-skills + agent prompts
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".kimi-code", "skills", "trellis-start", "SKILL.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".kimi-code",
+          "skills",
+          "trellis-continue",
+          "SKILL.md",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".kimi-code",
+          "skills",
+          "trellis-finish-work",
+          "SKILL.md",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".kimi-code",
+          "skills",
+          "trellis-implement",
+          "SKILL.md",
+        ),
+      ),
+    ).toBe(true);
+
+    // Custom sub-agent definitions → .kimi-code/agents/
+    for (const name of [
+      "trellis-implement",
+      "trellis-check",
+      "trellis-research",
+    ]) {
+      expect(
+        fs.existsSync(path.join(tmpDir, ".kimi-code", "agents", `${name}.md`)),
+      ).toBe(true);
+    }
+
+    // Kimi has no project-level hooks/settings surface.
+    expect(fs.existsSync(path.join(tmpDir, ".kimi-code", "hooks"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".kimi-code", "settings.json")),
+    ).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".cursor"))).toBe(false);
+
+    const hashFile = path.join(
+      tmpDir,
+      DIR_NAMES.WORKFLOW,
+      ".template-hashes.json",
+    );
+    const hashesFile = JSON.parse(fs.readFileSync(hashFile, "utf-8")) as {
+      __version?: number;
+      hashes?: Record<string, string>;
+    };
+    const hashes = hashesFile.hashes ?? {};
+    const trackedPaths = Object.keys(hashes).map((p) => p.replace(/\\/g, "/"));
+    const kimiTemplates = collectPlatformTemplates("kimi");
+    expect(kimiTemplates).toBeInstanceOf(Map);
+    if (!kimiTemplates) {
+      throw new Error("Expected Kimi templates to be collectable");
+    }
+    const expectedKimiPaths = [...kimiTemplates.keys()];
+    expect(trackedPaths).toEqual(expect.arrayContaining(expectedKimiPaths));
+  });
+
+  it("#3l trae platform writes hooks, commands, agents, and tracked templates", async () => {
+    await init({ yes: true, trae: true });
+
+    // Trae is agentCapable && hasHooks, so trellis-start is filtered like other
+    // SessionStart-backed platforms. The generated agents are still pull-based
+    // for sub-agent task context because Trae hooks cannot mutate sub-agent prompts.
+    expect(fs.existsSync(path.join(tmpDir, ".trae", "hooks.json"))).toBe(true);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".trae", "hooks", "session-start.py")),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trae", "hooks", "inject-workflow-state.py"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trae", "commands", "trellis-finish-work.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".trae", "commands", "trellis-start.md")),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trae", "agents", "trellis-implement.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.readFileSync(
+        path.join(tmpDir, ".trae", "agents", "trellis-implement.md"),
+        "utf-8",
+      ),
+    ).toContain("Load Trellis Context First");
+
+    const hashFile = path.join(
+      tmpDir,
+      DIR_NAMES.WORKFLOW,
+      ".template-hashes.json",
+    );
+    const hashesFile = JSON.parse(fs.readFileSync(hashFile, "utf-8")) as {
+      hashes?: Record<string, string>;
+    };
+    const trackedPaths = Object.keys(hashesFile.hashes ?? {}).map((p) =>
+      p.replace(/\\/g, "/"),
+    );
+    const traeTemplates = collectPlatformTemplates("trae");
+    expect(traeTemplates).toBeInstanceOf(Map);
+    if (!traeTemplates) {
+      throw new Error("Expected Trae templates to be collectable");
+    }
+    expect(trackedPaths).toEqual(
+      expect.arrayContaining([...traeTemplates.keys()]),
+    );
+  });
+
+  it("#3m zcode platform filters start command and writes hooks (hasHooks=true)", async () => {
+    await init({ yes: true, zcode: true });
+
+    // ZCode owns its private .zcode surface. Commands remain commands, while
+    // .zcode/skills contains workflow/bundled skills only. Since ZCode is
+    // agentCapable && hasHooks, the start command is filtered out (SessionStart
+    // hook injects equivalent context) and hook assets are written.
+    expect(fs.existsSync(path.join(tmpDir, ".agents", "skills"))).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".agents", "skills", "trellis-start", "SKILL.md"),
+      ),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "commands", "trellis", "start.md"),
+      ),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "skills", "trellis-start", "SKILL.md"),
+      ),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "skills", "trellis-continue", "SKILL.md"),
+      ),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".zcode",
+          "skills",
+          "trellis-finish-work",
+          "SKILL.md",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "skills", "trellis-check", "SKILL.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "agents", "trellis-implement.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".zcode", "agents", "trellis-check.md")),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".zcode", "agents", "trellis-research.md"),
+      ),
+    ).toBe(true);
+  });
+
+  it("[issue-zcode-plugin-hint] zcode init prints a concise bilingual plugin hint", async () => {
+    const originalVitest = process.env.VITEST;
+    const originalQuiet = process.env.TRELLIS_QUIET;
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderr: string[] = [];
+    process.stderr.write = ((chunk: string) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    delete process.env.VITEST;
+    delete process.env.TRELLIS_QUIET;
+
+    try {
+      await init({ yes: true, zcode: true });
+    } finally {
+      process.stderr.write = originalWrite;
+      if (originalVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = originalVitest;
+      if (originalQuiet === undefined) delete process.env.TRELLIS_QUIET;
+      else process.env.TRELLIS_QUIET = originalQuiet;
+    }
+
+    expect(stderr.join("")).toBe(
+      "ℹ️  ZCode: if project Hooks are disabled, install trellis-bridge, then start a new session.\n" +
+        "   ZCode：若项目 Hooks 被禁用，请安装 trellis-bridge，然后新建会话。\n" +
+        "   请手动在 ZCode 插件市场中添加 https://github.com/CNHLAIA/ZCode-Trellis-Plugin.git，并手动安装 ZCode 补丁插件 trellis-bridge\n",
+    );
+  });
+
+  it("#3n opencode platform emits start slash command", async () => {
+    await init({ yes: true, opencode: true });
+
+    // OpenCode is agentCapable && !hasHooks per registry (plugins/session-start.js
+    // provides equivalent injection, but the user-invocable /trellis:start is
+    // still emitted as fallback for plugin failures / manual reload).
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".opencode", "commands", "trellis", "start.md"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".opencode", "commands", "trellis", "finish-work.md"),
+      ),
+    ).toBe(true);
+  });
+
+  it("#3o reasonix platform emits trellis-start skill without runAs:subagent", async () => {
+    await init({ yes: true, reasonix: true });
+
+    // Reasonix is agentCapable && !hasHooks → trellis-start ships as a plain
+    // user-invocable skill. It must NOT carry the `runAs: subagent` frontmatter
+    // — that field is reserved for trellis-implement / trellis-check which run
+    // as isolated subagent loops.
+    const startSkill = path.join(
+      tmpDir,
+      ".reasonix",
+      "skills",
+      "trellis-start",
+      "SKILL.md",
+    );
+    expect(fs.existsSync(startSkill)).toBe(true);
+    expect(fs.readFileSync(startSkill, "utf-8")).not.toContain(
+      "runAs: subagent",
+    );
   });
 
   it("#4 force mode overwrites previously modified files", async () => {
@@ -1141,5 +1454,152 @@ describe("init() integration", () => {
         expect(hook.timeout).toBeGreaterThanOrEqual(15);
       }
     }
+  });
+
+  // ===========================================================================
+  // Claude Code statusLine interactive opt-in (--with-statusline)
+  // ===========================================================================
+
+  /** Install an inquirer mock that answers the tools checkbox with claude and
+   *  the statusLine confirm with the given answer. Records every statusLine
+   *  confirm question so tests can assert it fired (or not) and its default. */
+  async function installStatuslinePromptMock(
+    withStatusline: boolean,
+  ): Promise<{ confirms: { name?: string; default?: boolean }[] }> {
+    const inquirer = (await import("inquirer")).default;
+    const confirms: { name?: string; default?: boolean }[] = [];
+    vi.mocked(inquirer.prompt).mockImplementation(((questions: unknown) => {
+      const q = Array.isArray(questions) ? questions[0] : questions;
+      const question = q as { name?: string; default?: boolean };
+      if (question.name === "tools") {
+        return Promise.resolve({ tools: ["claude"] });
+      }
+      if (question.name === "withStatusline") {
+        confirms.push(question);
+        return Promise.resolve({ withStatusline });
+      }
+      return Promise.resolve({});
+    }) as never);
+    return { confirms };
+  }
+
+  it("#24 interactive init: statusLine confirm Yes installs statusline artifacts", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const { confirms } = await installStatuslinePromptMock(true);
+
+    await init({ user: "alice" });
+
+    // Asked exactly once, defaulting to No
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0].default).toBe(false);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(true);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".claude", "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(settings).toHaveProperty("statusLine");
+  });
+
+  it("#25 interactive init: statusLine confirm No (default) installs nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const { confirms } = await installStatuslinePromptMock(false);
+
+    await init({ user: "alice" });
+
+    expect(confirms).toHaveLength(1);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(false);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".claude", "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(settings).not.toHaveProperty("statusLine");
+  });
+
+  it("#26 -y mode never shows the statusLine confirm", async () => {
+    const { confirms } = await installStatuslinePromptMock(true);
+
+    await init({ yes: true, claude: true });
+
+    expect(confirms).toHaveLength(0);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(false);
+  });
+
+  it("#27 --with-statusline skips the confirm and installs", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    // Would answer No if (wrongly) asked — flag must win without prompting
+    const { confirms } = await installStatuslinePromptMock(false);
+
+    await init({ user: "alice", claude: true, withStatusline: true });
+
+    expect(confirms).toHaveLength(0);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(true);
+  });
+
+  it("#28 reinit add-platform: statusLine confirm fires for newly added claude", async () => {
+    // user is required so the bootstrap task is created — otherwise the second
+    // init routes through the aborted-init recovery instead of handleReinit
+    await init({ yes: true, cursor: true, user: "alice" });
+    expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(false);
+
+    const { confirms } = await installStatuslinePromptMock(true);
+    await init({ claude: true });
+
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0].default).toBe(false);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(true);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".claude", "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(settings).toHaveProperty("statusLine");
+  });
+
+  it("#28a issue #500: reinit configures Claude when native .claude settings already exist", async () => {
+    const nativeSettingsPath = path.join(tmpDir, ".claude", "settings.json");
+    fs.mkdirSync(path.dirname(nativeSettingsPath), { recursive: true });
+    fs.writeFileSync(nativeSettingsPath, '{"permissions":{"allow":[]}}\n');
+
+    await init({ yes: true, codex: true, user: "alice" });
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".claude", "skills", "trellis-meta", "SKILL.md"),
+      ),
+    ).toBe(false);
+
+    await init({ yes: true, claude: true });
+
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".claude", "skills", "trellis-meta", "SKILL.md"),
+      ),
+    ).toBe(true);
+    expect(fs.readFileSync(nativeSettingsPath, "utf-8")).toBe(
+      '{"permissions":{"allow":[]}}\n',
+    );
+  });
+
+  it("#29 reinit add-platform: no confirm when claude is already configured", async () => {
+    await init({ yes: true, claude: true, user: "alice" });
+
+    const { confirms } = await installStatuslinePromptMock(true);
+    // Re-running with --claude skips the already-configured platform — the
+    // confirm must be pre-filtered out, not asked and then silently ignored
+    await init({ claude: true });
+
+    expect(confirms).toHaveLength(0);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".claude", "hooks", "statusline.py")),
+    ).toBe(false);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".claude", "settings.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(settings).not.toHaveProperty("statusLine");
   });
 });

@@ -11,6 +11,9 @@
  *   2. Phantom-delete — after `shutil.move` of a tracked task dir, the
  *      source-side deletions must land in the archive commit (so the
  *      working tree stays clean against HEAD).
+ *   3. Commit-failure visibility — if the archive move succeeds but git
+ *      cannot create the bookkeeping commit, `task.py archive` must fail
+ *      loudly so callers do not continue to journal over dirty deletes.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -145,6 +148,37 @@ describe.skipIf(!hasPython())(
       expect(status).toMatch(/M\s+\.trellis\/tasks\/task-b\/prd\.md/);
     });
 
+    it("does not sweep pre-staged unrelated files into the archive commit (#579)", () => {
+      makeTask(tmp, "task-a", "task A prd\n");
+      git(tmp, "add", "-A");
+      git(tmp, "commit", "-q", "-m", "initial");
+
+      // The developer stages an unrelated file BEFORE archiving.
+      fs.writeFileSync(path.join(tmp, "README.md"), "unrelated staged work\n");
+      git(tmp, "add", "README.md");
+
+      runArchive(tmp, "task-a");
+
+      const lastFiles = git(
+        tmp,
+        "show",
+        "HEAD",
+        "--name-only",
+        "--pretty=format:",
+      )
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      // The archive commit contains only Trellis-owned paths.
+      expect(lastFiles).not.toContain("README.md");
+      expect(lastFiles.every((f) => f.startsWith(".trellis/"))).toBe(true);
+
+      // The developer's file is still staged, ready for their own commit.
+      const status = git(tmp, "status", "--porcelain");
+      expect(status).toMatch(/^A\s+README\.md/m);
+    });
+
     it(
       "stages source-side deletions in the archive commit (phantom-delete fix)",
       () => {
@@ -198,5 +232,65 @@ describe.skipIf(!hasPython())(
       },
       30_000, // python startup + 100-file ops can be slow
     );
+
+    it("refuses to archive a mistyped name that resolves to a real source dir", () => {
+      makeTask(tmp, "real-task", "# real task\n");
+      // A user source directory that is NOT a task.
+      const srcDir = path.join(tmp, "src");
+      fs.mkdirSync(srcDir, { recursive: true });
+      fs.writeFileSync(path.join(srcDir, "index.ts"), "export const x = 1;\n");
+      git(tmp, "add", "-A");
+      git(tmp, "commit", "-q", "-m", "initial");
+
+      // Typo: `archive src` instead of a task name. resolve_task_dir falls
+      // back to repo_root/src; without the guard this moves the whole source
+      // dir into .trellis/tasks/archive/.
+      const r = spawnSync(
+        "python3",
+        [".trellis/scripts/task.py", "archive", "src"],
+        { cwd: tmp, encoding: "utf-8" },
+      );
+
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("refusing to archive");
+      // src/ untouched, still at its original location with its file.
+      expect(fs.existsSync(path.join(srcDir, "index.ts"))).toBe(true);
+      // No archive dir was created holding a moved src.
+      expect(
+        fs.existsSync(
+          path.join(tmp, ".trellis", "tasks", "archive"),
+        ),
+      ).toBe(false);
+    });
+
+    it("fails when archive auto-commit cannot record tracked source deletes", () => {
+      makeTask(tmp, "tracked", "# tracked task\n");
+      git(tmp, "add", "-A");
+      git(tmp, "commit", "-q", "-m", "initial");
+
+      // Simulate a repo where git can stage the archive move but cannot
+      // create the commit. A failing hook is deterministic even when the
+      // developer machine has global git identity configured.
+      const hookPath = path.join(tmp, ".git", "hooks", "pre-commit");
+      fs.writeFileSync(
+        hookPath,
+        "#!/bin/sh\necho archive commit blocked >&2\nexit 1\n",
+      );
+      fs.chmodSync(hookPath, 0o755);
+
+      const r = spawnSync(
+        "python3",
+        [".trellis/scripts/task.py", "archive", "tracked"],
+        { cwd: tmp, encoding: "utf-8" },
+      );
+
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("Archive moved on disk");
+      expect(r.stderr).toContain("Auto-commit failed");
+
+      const status = git(tmp, "status", "--porcelain");
+      expect(status).toContain(".trellis/tasks/tracked/");
+      expect(status).toContain(".trellis/tasks/archive/");
+    });
   },
 );

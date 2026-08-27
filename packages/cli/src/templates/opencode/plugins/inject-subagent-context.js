@@ -8,7 +8,13 @@
 
 import { existsSync, readdirSync } from "fs"
 import { join } from "path"
-import { TrellisContext, debugLog } from "../lib/trellis-context.js"
+import {
+  TrellisContext,
+  debugLog,
+  readContextInjectionLimits,
+  ContextBudget,
+  materializeArtifact,
+} from "../lib/trellis-context.js"
 
 // Supported subagent types
 const AGENTS_ALL = ["implement", "check", "research"]
@@ -29,49 +35,112 @@ function extractActiveTaskHint(prompt) {
  * Get context for implement agent. `taskDir` may be relative
  * (`.trellis/tasks/foo`) or absolute; both are resolved via
  * `ctx.resolveTaskDir`.
+ *
+ * Read order (mirrors Python `get_implement_context`):
+ *   1. All files in implement.jsonl (spec/research manifests)
+ *   2. prd.md (requirements)
+ *   3. design.md if present (technical design)
+ *   4. implement.md if present (execution plan)
+ * All blocks share one total budget (issue #441).
  */
 function getImplementContext(ctx, taskDir) {
   const parts = []
   const taskDirFull = ctx.resolveTaskDir(taskDir)
   if (!taskDirFull) return ""
 
+  const limits = readContextInjectionLimits(ctx.directory)
+  const budget = new ContextBudget(limits.max_total_bytes)
+
+  // 1. Read implement.jsonl
   const jsonlPath = join(taskDirFull, "implement.jsonl")
-  const entries = ctx.readJsonlWithFiles(jsonlPath)
-  if (entries.length > 0) {
-    parts.push(ctx.buildContextFromEntries(entries))
+  const blocks = ctx.readJsonlWithFiles(jsonlPath, limits, budget)
+  if (blocks.length > 0) {
+    parts.push(ctx.buildContextFromEntries(blocks))
   }
 
-  const prd = ctx.readFile(join(taskDirFull, "prd.md"))
-  if (prd) {
-    parts.push(`=== ${taskDir}/prd.md (Requirements) ===\n${prd}`)
-  }
+  // 2. Requirements document
+  const prdBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/prd.md`,
+    `${taskDir}/prd.md (Requirements)`,
+    "Requirements document",
+    limits,
+    budget,
+  )
+  if (prdBlock) parts.push(prdBlock)
 
-  const info = ctx.readFile(join(taskDirFull, "info.md"))
-  if (info) {
-    parts.push(`=== ${taskDir}/info.md (Technical Design) ===\n${info}`)
-  }
+  // 3. Technical design for complex tasks
+  const designBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/design.md`,
+    `${taskDir}/design.md (Technical Design)`,
+    "Technical design document",
+    limits,
+    budget,
+  )
+  if (designBlock) parts.push(designBlock)
+
+  // 4. Execution plan for complex tasks
+  const implementPlanBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/implement.md`,
+    `${taskDir}/implement.md (Execution Plan)`,
+    "Execution plan document",
+    limits,
+    budget,
+  )
+  if (implementPlanBlock) parts.push(implementPlanBlock)
 
   return parts.join("\n\n")
 }
 
 /**
  * Get context for check agent. `taskDir` may be relative or absolute.
+ * Same read order and shared budget as the implement context.
  */
 function getCheckContext(ctx, taskDir) {
   const parts = []
   const taskDirFull = ctx.resolveTaskDir(taskDir)
   if (!taskDirFull) return ""
 
+  const limits = readContextInjectionLimits(ctx.directory)
+  const budget = new ContextBudget(limits.max_total_bytes)
+
   const jsonlPath = join(taskDirFull, "check.jsonl")
-  const entries = ctx.readJsonlWithFiles(jsonlPath)
-  if (entries.length > 0) {
-    parts.push(ctx.buildContextFromEntries(entries))
+  const blocks = ctx.readJsonlWithFiles(jsonlPath, limits, budget)
+  if (blocks.length > 0) {
+    parts.push(ctx.buildContextFromEntries(blocks))
   }
 
-  const prd = ctx.readFile(join(taskDirFull, "prd.md"))
-  if (prd) {
-    parts.push(`=== ${taskDir}/prd.md (Requirements) ===\n${prd}`)
-  }
+  const prdBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/prd.md`,
+    `${taskDir}/prd.md (Requirements)`,
+    "Requirements document",
+    limits,
+    budget,
+  )
+  if (prdBlock) parts.push(prdBlock)
+
+  const designBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/design.md`,
+    `${taskDir}/design.md (Technical Design)`,
+    "Technical design document",
+    limits,
+    budget,
+  )
+  if (designBlock) parts.push(designBlock)
+
+  const implementPlanBlock = materializeArtifact(
+    ctx.directory,
+    `${taskDir}/implement.md`,
+    `${taskDir}/implement.md (Execution Plan)`,
+    "Execution plan document",
+    limits,
+    budget,
+  )
+  if (implementPlanBlock) parts.push(implementPlanBlock)
 
   return parts.join("\n\n")
 }
@@ -165,8 +234,8 @@ ${originalPrompt}
 ## Workflow
 
 1. **Understand specs** - All dev specs are injected above
-2. **Understand requirements** - Read requirements and technical design
-3. **Implement feature** - Follow specs and design
+2. **Understand task artifacts** - Read requirements, technical design if present, and execution plan if present
+3. **Implement feature** - Follow specs and task artifacts
 4. **Self-check** - Ensure code quality
 
 ## Important Constraints
@@ -195,7 +264,7 @@ ${originalPrompt}
 ## Workflow
 
 1. **Review changes** - Run \`git diff --name-only\` to see all changed files
-2. **Verify requirements** - Check each requirement in prd.md is implemented
+2. **Verify task artifacts** - Check prd.md and, when present, design.md / implement.md
 3. **Spec sync** - Analyze whether changes introduce new patterns, contracts, or conventions
    - If new pattern/convention found: read target spec file → update it → update index.md if needed
    - If infra/cross-layer change: follow the 7-section mandatory template from update-spec.md
@@ -209,7 +278,8 @@ ${originalPrompt}
 - MUST read the target spec file BEFORE editing (avoid duplicating existing content)
 - Do NOT update specs for trivial changes (typos, formatting, obvious fixes)
 - If critical CODE issues found, report them clearly (fix specs, not code)
-- Verify all acceptance criteria in prd.md are met` :
+- Verify all acceptance criteria in prd.md are met
+- Verify design.md and implement.md constraints when those files are present` :
       `<!-- trellis-hook-injected -->
 # Check Agent Task
 
@@ -332,8 +402,10 @@ function commandStartsWithTrellisContext(command) {
 }
 
 /**
- * OpenCode TUI may not expose OPENCODE_RUN_ID to Bash. The plugin hook still
- * receives session identity, so inject it into Bash commands before execution.
+ * OpenCode exposes no session identity to Bash at all — it sets no session env
+ * var in any process. The plugin hook does receive it, so inject it into Bash
+ * commands before execution; that prefix is the only channel by which an
+ * AI-run `task.py` sees the OpenCode session.
  */
 function injectTrellisContextIntoBash(ctx, input, output, hostPlatform, env) {
   const args = output?.args

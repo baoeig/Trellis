@@ -11,7 +11,8 @@ Track work items with phase-based execution.
 ├── {MM-DD-slug}/               # Active task directories
 │   ├── task.json               # Metadata, phases, branch
 │   ├── prd.md                  # Requirements document
-│   ├── info.md                 # Additional context (optional)
+│   ├── design.md               # Technical design for complex tasks
+│   ├── implement.md            # Execution plan for complex tasks
 │   ├── implement.jsonl         # Context for implement phase
 │   ├── check.jsonl             # Context for check phase
 │   └── debug.jsonl             # Context for debug phase
@@ -123,9 +124,8 @@ Implement user authentication with email/password.
 - [ ] User can log in with valid credentials
 - [ ] Error shown for invalid credentials
 
-## Technical Notes
-- Use existing auth service pattern
-- Follow security guidelines in spec
+## Research References
+- Link to relevant research/spec notes
 ```
 
 ---
@@ -183,8 +183,8 @@ python3 .trellis/scripts/task.py finish
 ### Create Task
 
 ```bash
-python3 .trellis/scripts/task.py create "Task name" --slug task-slug
-python3 .trellis/scripts/task.py create "Child task" --slug child --parent <parent-dir>
+python3 .trellis/scripts/task.py create "Task name" --description "What this task delivers" --slug task-slug
+python3 .trellis/scripts/task.py create "Child task" --description "What this child delivers" --slug child --parent <parent-dir>
 ```
 
 Options: `--assignee <name>`, `--priority P0|P1|P2|P3`, `--description "text"`, `--parent <dir>`

@@ -101,7 +101,7 @@ Use when:
 
 ```bash
 # title is task description, --slug for task directory name
-TASK_DIR=$(python3 ./.trellis/scripts/task.py create "<title>" --slug <task-name>)
+TASK_DIR=$(python3 ./.trellis/scripts/task.py create "<title>" --description "<one-line summary>" --slug <task-name>)
 ```
 
 #### Step 2: Configure Task
@@ -122,18 +122,26 @@ python3 ./.trellis/scripts/task.py add-context "$TASK_DIR" implement "<path>" "<
 python3 ./.trellis/scripts/task.py add-context "$TASK_DIR" check "<path>" "<reason>"
 ```
 
-#### Step 4: Create prd.md
+#### Step 4: Update prd.md
 
 ```bash
-cat > "$TASK_DIR/prd.md" << 'EOF'
+# task.py create already created prd.md; edit it with requirements and acceptance criteria.
+$EDITOR "$TASK_DIR/prd.md"
+```
+
+Use this shape:
+
+```markdown
 # Feature: <name>
+
+## Goal
+...
 
 ## Requirements
 - ...
 
 ## Acceptance Criteria
-- ...
-EOF
+- [ ] ...
 ```
 
 #### Step 5: Validate and Start
@@ -181,10 +189,10 @@ python3 ./.trellis/scripts/multi_agent/cleanup.py <branch>          # Cleanup wo
 
 The dispatch agent in worktree will automatically execute:
 
-1. implement â†?Implement feature
-2. check â†?Check code quality
-3. finish â†?Final verification
-4. create-pr â†?Create PR
+1. implement ï¿½?Implement feature
+2. check ï¿½?Check code quality
+3. finish ï¿½?Final verification
+4. create-pr ï¿½?Create PR
 
 ---
 

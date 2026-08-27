@@ -13,12 +13,15 @@ import {
   scrubOpencodePackageJson,
   scrubPiSettings,
   scrubCodexConfigToml,
+  scrubManagedMarkdownBlock,
 } from "../../src/utils/uninstall-scrubbers.js";
+import { getConfigTemplate as getCodexConfigTemplate } from "../../src/templates/codex/index.js";
 
 const CLAUDE_DELETE_PATHS = [
   ".claude/hooks/session-start.py",
   ".claude/hooks/inject-subagent-context.py",
   ".claude/hooks/inject-workflow-state.py",
+  ".claude/hooks/statusline.py",
 ];
 
 const CURSOR_DELETE_PATHS = [
@@ -27,6 +30,9 @@ const CURSOR_DELETE_PATHS = [
   ".cursor/hooks/inject-workflow-state.py",
   ".cursor/hooks/inject-shell-session-context.py",
 ];
+
+const TEST_BLOCK_START = "<!-- TRELLIS:TEST:START -->";
+const TEST_BLOCK_END = "<!-- TRELLIS:TEST:END -->";
 
 describe("scrubHooksJson — nested schema", () => {
   it("strips trellis hook entries from a Claude-style file", () => {
@@ -69,6 +75,57 @@ describe("scrubHooksJson — nested schema", () => {
     expect(parsed.hooks).toBeUndefined();
     expect(parsed.env).toEqual(input.env);
     expect(parsed.enabledPlugins).toEqual({});
+    expect(fullyEmpty).toBe(false);
+  });
+
+  it("removes the exact opt-in Trellis statusLine while preserving other settings", () => {
+    const input = {
+      env: { USER_VALUE: "keep" },
+      statusLine: {
+        type: "command",
+        command: "python3 .claude/hooks/statusline.py",
+      },
+    };
+    const { content, fullyEmpty } = scrubHooksJson(
+      JSON.stringify(input),
+      CLAUDE_DELETE_PATHS,
+      "nested",
+    );
+    expect(JSON.parse(content)).toEqual({ env: input.env });
+    expect(fullyEmpty).toBe(false);
+  });
+
+  it("preserves a user-owned Claude statusLine command", () => {
+    const input = {
+      statusLine: {
+        type: "command",
+        command: "python3 .claude/hooks/my-statusline.py",
+      },
+    };
+    const { content, fullyEmpty } = scrubHooksJson(
+      JSON.stringify(input),
+      CLAUDE_DELETE_PATHS,
+      "nested",
+    );
+    expect(JSON.parse(content)).toEqual(input);
+    expect(fullyEmpty).toBe(false);
+  });
+
+  it("preserves the Trellis-shaped statusLine when the manifest does not own it", () => {
+    const input = {
+      statusLine: {
+        type: "command",
+        command: "python3 .claude/hooks/statusline.py",
+      },
+    };
+    const { content, fullyEmpty } = scrubHooksJson(
+      JSON.stringify(input),
+      CLAUDE_DELETE_PATHS.filter(
+        (managedPath) => managedPath !== ".claude/hooks/statusline.py",
+      ),
+      "nested",
+    );
+    expect(JSON.parse(content)).toEqual(input);
     expect(fullyEmpty).toBe(false);
   });
 
@@ -270,7 +327,8 @@ describe("scrubHooksJson — flat schema", () => {
           {
             type: "command",
             bash: "python3 .github/copilot/hooks/inject-workflow-state.py",
-            powershell: "python3 .github/copilot/hooks/inject-workflow-state.py",
+            powershell:
+              "python3 .github/copilot/hooks/inject-workflow-state.py",
             timeoutSec: 5,
           },
         ],
@@ -326,6 +384,63 @@ describe("scrubOpencodePackageJson", () => {
     const parsed = JSON.parse(content);
     expect(parsed.name).toBe("my-project");
     expect(parsed.dependencies).toEqual({ lodash: "^4.0.0" });
+    expect(fullyEmpty).toBe(false);
+  });
+});
+
+describe("scrubManagedMarkdownBlock", () => {
+  it("removes the managed block and preserves user markdown", () => {
+    const input = `# User Guidance
+
+Keep this.
+
+${TEST_BLOCK_START}
+# Managed
+Remove this.
+${TEST_BLOCK_END}
+
+## Tail
+
+Also keep this.
+`;
+
+    const { content, fullyEmpty } = scrubManagedMarkdownBlock(
+      input,
+      TEST_BLOCK_START,
+      TEST_BLOCK_END,
+    );
+
+    expect(content).toBe(`# User Guidance
+
+Keep this.
+
+## Tail
+
+Also keep this.
+`);
+    expect(fullyEmpty).toBe(false);
+  });
+
+  it("reports fullyEmpty when only the managed block remains", () => {
+    const { content, fullyEmpty } = scrubManagedMarkdownBlock(
+      `${TEST_BLOCK_START}\nmanaged\n${TEST_BLOCK_END}\n`,
+      TEST_BLOCK_START,
+      TEST_BLOCK_END,
+    );
+
+    expect(content).toBe("");
+    expect(fullyEmpty).toBe(true);
+  });
+
+  it("leaves malformed marker pairs untouched", () => {
+    const input = `${TEST_BLOCK_START}\nmanaged\n`;
+    const { content, fullyEmpty } = scrubManagedMarkdownBlock(
+      input,
+      TEST_BLOCK_START,
+      TEST_BLOCK_END,
+    );
+
+    expect(content).toBe(input);
     expect(fullyEmpty).toBe(false);
   });
 });
@@ -416,6 +531,31 @@ project_doc_fallback_filenames = ["AGENTS.md"]
     const { content, fullyEmpty } = scrubCodexConfigToml(TEMPLATE);
     expect(fullyEmpty).toBe(true);
     expect(content.trim()).toBe("");
+  });
+
+  it("removes the complete current Codex template, including agents.max_depth", () => {
+    const { content, fullyEmpty } = scrubCodexConfigToml(
+      getCodexConfigTemplate().content,
+    );
+    expect(fullyEmpty).toBe(true);
+    expect(content).toBe("");
+  });
+
+  it("preserves user-owned keys in the agents table while removing Trellis max_depth", () => {
+    const mixed = `${getCodexConfigTemplate().content}user_key = "keep"\n`;
+    const { content, fullyEmpty } = scrubCodexConfigToml(mixed);
+    expect(fullyEmpty).toBe(false);
+    expect(content).toContain("[agents]");
+    expect(content).toContain('user_key = "keep"');
+    expect(content).not.toContain("max_depth = 1");
+    expect(content).not.toContain("Trellis");
+  });
+
+  it("stops agents cleanup before a user-owned array-of-tables section", () => {
+    const input = `[agents]\nmax_depth = 1\n\n[[agents]]\nname = "user"\nmax_depth = 1\n`;
+    const { content, fullyEmpty } = scrubCodexConfigToml(input);
+    expect(fullyEmpty).toBe(false);
+    expect(content).toBe(`[[agents]]\nname = "user"\nmax_depth = 1\n`);
   });
 
   it("preserves user-added TOML content", () => {

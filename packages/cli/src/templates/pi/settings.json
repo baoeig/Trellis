@@ -3,19 +3,7 @@
   "extensions": [
     "./extensions/trellis/index.ts"
   ],
-  "skills": [
-    "./skills"
-  ],
   "prompts": [
     "./prompts"
-  ],
-  "packages": [
-    {
-      "source": "npm:pi-subagents",
-      "extensions": [],
-      "skills": [],
-      "prompts": [],
-      "themes": []
-    }
   ]
 }

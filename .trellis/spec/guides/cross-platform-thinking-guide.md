@@ -132,6 +132,8 @@ A path string has two distinct roles. **Treat them differently.**
 
 **Single source of truth**: `packages/cli/src/utils/posix.ts` exports `toPosix(p)`. Don't sprinkle `replaceAll('\\', '/')` at every `path.join` site — apply `toPosix` **once at the boundary**: collector exit (Map key entering hash dictionary) or write-time (`saveHashes` before `JSON.stringify`).
 
+**This rule is now load-bearing for writes too**, not just for hash lookups: `writeTemplateMap` (`configurators/shared.ts:560`) reconstructs the target path by splitting the map key on `/`. A backslashed key would write one file named `a\b\c.md` instead of three nested directories.
+
 ```typescript
 // BAD - logical key carries OS-native separator
 function collectTemplates(): Map<string, string> {
@@ -340,7 +342,7 @@ result = subprocess.run(
 When making platform-related changes, check **all these locations**:
 
 ### Commands / Skills Sync
-- [ ] New command/skill added to ALL platforms (claude, cursor, iflow, codex, and any new platform)
+- [ ] New command/skill added to ALL platforms — the list is `PLATFORM_IDS` in `configurators/index.ts`, not a remembered set
 - [ ] Each platform's test file updated with new entry in `EXPECTED_COMMAND_NAMES` / `EXPECTED_SKILL_NAMES`
 - [ ] Platform-integration spec's required command table updated if adding a new required command
 - [ ] Command format matches platform convention (see `platform-integration.md` → Command Format by Platform)
@@ -531,6 +533,10 @@ src/templates/script.py  ← Updated
 .trellis/scripts/script.py  ← Forgot to sync!
 ```
 
+No longer silent: a `.py` byte difference between the two trees fails the
+test suite. See `cli/backend/script-conventions.md` → "Two script trees, one
+content".
+
 ### 4. "Python 3 is always python3"
 
 ```bash
@@ -592,4 +598,42 @@ node -e "
 const { getMigrationsForVersion } = require('./dist/migrations/index.js');
 console.log('From 0.2.12:', getMigrationsForVersion('0.2.12', 'CURRENT').length);
 "
+```
+
+## Release Checklist: Bundled Assets
+
+When release notes or docs claim an asset is bundled, installed automatically, or
+included with Trellis, verify the whole distribution path:
+
+- [ ] Source file exists in the branch being tagged, not only in another branch,
+  docs submodule, or marketplace tree.
+- [ ] `pnpm build` copies the asset into `dist/templates/**`.
+- [ ] `npm pack --dry-run --json` includes the expected `dist/**` path.
+- [ ] The built binary installs the asset in a fresh temp repository.
+- [ ] `.trellis/.template-hashes.json` tracks the generated asset path.
+- [ ] `trellis update --dry-run` reports `Already up to date!` in that temp
+  repository.
+
+**Why this matters**: docs/changelog text can move independently from the code
+branch that owns distributable templates. A feature can be documented as bundled
+while the published npm tarball still lacks the files.
+
+```bash
+pnpm --filter @mindfoldhq/trellis build
+
+cd packages/cli
+npm pack --dry-run --json | grep 'dist/templates/common/bundled-skills/<skill>/SKILL.md'
+cd ../..
+
+tmpdir=$(mktemp -d /tmp/trellis-built-bin-smoke-XXXXXX)
+printf '{"name":"trellis-smoke","version":"0.0.0"}\n' > "$tmpdir/package.json"
+git -C "$tmpdir" init -q
+(
+  cd "$tmpdir"
+  node /path/to/Trellis/packages/cli/bin/trellis.js init -u smoke --yes --claude --codex
+  test -f .claude/skills/<skill>/SKILL.md
+  test -f .agents/skills/<skill>/SKILL.md
+  grep -q '<skill>' .trellis/.template-hashes.json
+  node /path/to/Trellis/packages/cli/bin/trellis.js update --dry-run
+)
 ```

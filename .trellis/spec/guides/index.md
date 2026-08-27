@@ -23,7 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
-| [Cross-Platform Thinking Guide](./cross-platform-thinking-guide.md) | Catch platform-specific assumptions | Scripts, paths, commands |
+| [Cross-Platform Thinking Guide](./cross-platform-thinking-guide.md) | Catch OS, shell, Python, path, and persistence assumptions | When commands, hooks, templates, scripts, or persisted JSON must work across platforms |
 
 ---
 
@@ -35,6 +35,8 @@ These guides help you **ask the right questions before coding**.
 - [ ] Data format changes between layers
 - [ ] Multiple consumers need the same data
 - [ ] You're not sure where to put some logic
+- [ ] You are adding an event kind, JSONL record, RPC payload, or config field
+- [ ] UI / command code starts casting raw payload fields directly
 
 → Read [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md)
 
@@ -45,15 +47,19 @@ These guides help you **ask the right questions before coding**.
 - [ ] You're adding a new field to multiple places
 - [ ] **You're modifying any constant or config**
 - [ ] **You're creating a new utility/helper function** ← Search first!
+- [ ] Two files read the same untyped payload field with local casts
+- [ ] Multiple branches update the same derived state from `kind` / `action`
 
 → Read [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md)
 
 ### When to Think About Cross-Platform Issues
 
-- [ ] Writing scripts that users will run directly
-- [ ] Adding usage examples or help text
-- [ ] Working with file paths or commands
-- [ ] **Migrating from shell scripts to Python**
+- [ ] You are editing Python scripts, shell commands, hooks, or generated config
+- [ ] You are adding or documenting a command users copy into terminals
+- [ ] Code or docs assume `python3`, shebang execution, `/` path separators, or
+      POSIX-only shell behavior
+- [ ] You are changing persisted JSON or migrations that must work across
+      macOS, Linux, and Windows
 
 → Read [Cross-Platform Thinking Guide](./cross-platform-thinking-guide.md)
 

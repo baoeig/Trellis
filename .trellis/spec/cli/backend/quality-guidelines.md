@@ -283,7 +283,7 @@ Classify each hit:
 
 | Kind | Example | Action |
 |------|---------|--------|
-| **Schema / creator** | `task_store.cmd_create`, `utils/task-json.ts:emptyTaskJson` (TS factory used by `init.ts` + `update.ts`) | Drop field from output |
+| **Schema / creator** | `task_store.cmd_create`, `@mindfoldhq/trellis-core/task:emptyTaskRecord` (re-exported by `utils/task-json.ts:emptyTaskJson` for legacy CLI call sites) | Drop field from output |
 | **Writer / updater** | `inject-subagent-context.py:update_current_phase`, OpenCode plugin equivalent | **Drop the write call OR delete the function entirely** |
 | **Reader / getter** | `tasks.py:load_task` (defaults via `data.get("field", default)` on `TaskInfo`) | Keep with tolerance default (`data.get("field", null)`) — handles legacy files |
 | **Docs / comments** | spec, README, PRDs | Update references |
@@ -342,7 +342,7 @@ The task `04-21-task-schema-unify` ran a retroactive audit on the 0.5.0-beta.0 d
 |---|----------|------------|-------------------------------|
 | 1 | `packages/cli/src/commands/init.ts` (`interface TaskJson` + `getBootstrapTaskJson`) | Divergent 17-field TS interface + inline object literal | Audit grepped for field names, but this writer omitted them rather than writing them — it silently diverged in shape, not content |
 | 2 | `packages/cli/src/commands/update.ts` (migration-task inline literal) | Inline TS object still wrote `current_phase: 0` + `next_action: [...]` | Writer lives in a language the original Python-focused audit skipped |
-| 3 | `.trellis/scripts/create_bootstrap.py` | Orphan Python CLI — its own 13-field shape incl. structured subtasks | Not invoked by any command; shipped as template but dead. Easy to miss because grepping for "bootstrap" returns too many hits |
+| 3 | Historical `create_bootstrap.py` script (removed in 0.5.0-beta.9) | Orphan Python CLI — its own 13-field shape incl. structured subtasks | Was not invoked by any command and was shipped as a dead template. It is now removed by hash-verified migration, but remains part of the case study because it explains why shipped-but-unused files count during schema audits |
 | 4 | `.trellis/scripts/common/types.py` — `TaskData` TypedDict declared `current_phase: int` + `next_action: list[dict]` | **Type-declaration writer**: no runtime code produces the field, but readers that annotate `TaskData` get IDE autocomplete for ghost fields, and code reviewers see "valid field" | A TypedDict is technically a declaration, not a writer — but to the reader-side contract, it IS a writer of expectations |
 
 **Three lessons added to the audit discipline**:
@@ -351,7 +351,15 @@ The task `04-21-task-schema-unify` ran a retroactive audit on the 0.5.0-beta.0 d
 2. **Shipped-but-unused code counts**: any file enumerated in a template registry (`packages/cli/src/templates/trellis/index.ts`, `templates/markdown/index.ts`) is a writer of user expectations even if no command invokes it. Orphan = still writes.
 3. **Type declarations count as writers of the reader-side contract**: a TypedDict / TS interface that still declares the deprecated field misleads consumers the same way a runtime writer does. Prune declarations in the same PR as runtime writers.
 
-**Consolidation outcome**: `packages/cli/src/utils/task-json.ts` now exports a single `TaskJson` type + `emptyTaskJson(overrides)` factory. Both `init.ts` and `update.ts` route through it. The audit set for future schema changes is now: canonical Python `cmd_create` (runtime) + canonical TS `emptyTaskJson` (bootstrap + migration) + `TaskData` TypedDict (declaration). Three surfaces instead of seven.
+**Consolidation outcome**: the canonical TypeScript task shape now lives in
+`@mindfoldhq/trellis-core/task` as `TrellisTaskRecord` +
+`emptyTaskRecord(overrides)`. `packages/cli/src/utils/task-json.ts` only
+re-exports those under the legacy `TaskJson` / `emptyTaskJson` names for CLI
+call sites. Both `init.ts` and `update.ts` route through that shared factory.
+The audit set for future schema changes is now: canonical Python `cmd_create`
+(runtime) + core `TrellisTaskRecord` / `emptyTaskRecord` (TS schema + factory) +
+CLI `utils/task-json.ts` re-export users (bootstrap + migration) + `TaskData`
+TypedDict (Python declaration).
 
 ---
 
@@ -395,13 +403,13 @@ When a CLI has both explicit flags (`--tool`) and convenience flags (`-y`), expl
 ```typescript
 // Bad: -y overrides explicit flags
 if (options.yes) {
-  tools = ["cursor", "claude"]; // Ignores --iflow, --opencode!
-} else if (options.cursor || options.iflow) {
+  tools = ["cursor", "claude"]; // Ignores --codex, --opencode!
+} else if (options.cursor || options.codex) {
   // Build from flags...
 }
 
 // Good: Check explicit flags first
-const hasExplicitTools = options.cursor || options.iflow || options.opencode;
+const hasExplicitTools = options.cursor || options.codex || options.opencode;
 if (hasExplicitTools) {
   // Build from explicit flags (works with or without -y)
 } else if (options.yes) {
@@ -494,14 +502,14 @@ When handling multiple similar options, use arrays with metadata instead of repe
 // Bad: Repetitive if-else
 if (options.cursor) tools.push("cursor");
 if (options.claude) tools.push("claude");
-if (options.iflow) tools.push("iflow");
+if (options.codex) tools.push("codex");
 // ... repeated logic, easy to miss one
 
 // Good: Data-driven approach
 const TOOLS = [
   { key: "cursor", name: "Cursor", defaultChecked: true },
   { key: "claude", name: "Claude Code", defaultChecked: true },
-  { key: "iflow", name: "iFlow CLI", defaultChecked: false },
+  { key: "codex", name: "Codex", defaultChecked: false },
 ] as const;
 
 // Single source of truth for:
@@ -863,7 +871,101 @@ Multi-entry dispatch is a structural force-multiplier for bugs: every entry path
 
 ### Case Study (2026-04-30): issue #204 `--yes` + bootstrap recovery
 
-The first commit (`346003d`) added a `tasksEmpty` fallback only in `init()`'s main dispatch. It made the `--yes` log line correct, made `--force --yes` recover bootstrap, and added a passing test (`#2b` with `force: true`). It did NOT fix the user's literal reported command — `trellis init -u <name> --codex --yes` — because that command goes through `handleReinit` at `init.ts:931`, which short-circuits before reaching the patched dispatch. Caught by `trellis-check` sub-agent doing a live CLI repro on the dist build. Fixed in `589f753` by adding `!tasksEmptyEarly` to the reinit guard, plus splitting the test into `#2b` (no force, reported case) and `#2c` (with force, parity check).
+The first commit (`346003d`) added a `tasksEmpty` fallback only in `init()`'s main dispatch. It made the `--yes` log line correct, made `--force --yes` recover bootstrap, and added a passing test (`#2b` with `force: true`). It did NOT fix the user's literal reported command — `trellis init -u <name> --codex --yes` — because that command goes through `handleReinit` (defined at `init.ts:740`, called at `init.ts:1081`), which short-circuits before reaching the patched dispatch. Caught by `trellis-check` sub-agent doing a live CLI repro on the dist build. Fixed in `589f753` by adding `!tasksEmptyEarly` to the reinit guard, plus splitting the test into `#2b` (no force, reported case) and `#2c` (with force, parity check).
+
+---
+
+## Native dependency policy
+
+### Cautionary tale — 0.6.0-beta.3 → 0.6.0-beta.4 emergency revert
+
+0.6.0-beta.3 added `better-sqlite3` (a native C++ binding) to read OpenCode 1.2+ session storage, which switched from JSONL to SQLite. On Windows + China network, the failure cascade was:
+
+1. `prebuild-install` tries to download a prebuilt binary from the GitHub releases CDN.
+2. CDN times out (China network reliability for `github.com/.../releases/download/...` is poor).
+3. `node-gyp` source-build fallback kicks in.
+4. Source build needs Visual Studio 2017+ Build Tools, which most Windows users don't have installed.
+5. Install fails — **`trellis` itself can no longer be installed at all**.
+
+Time to detect: ~4 hours after publish. Fix: emergency revert in 0.6.0-beta.4 (removed `better-sqlite3`, marked the OpenCode 1.2+ SQLite reader as degraded with a soft-degrade fallback). The OpenCode SQLite section in `commands-mem.md` is now a stub describing the degraded state.
+
+The lesson: **a native dep that fails to install fails the entire CLI**, not just one feature. For a productivity tool, that tradeoff is unacceptable unless the perf benefit is dramatic and unreplaceable.
+
+### Rules
+
+#### 1. Avoid native deps in the trellis CLI by default
+
+Trellis is a productivity / scaffolding tool. Install reliability across all OS / network conditions matters more than per-call perf. The default answer to "should we add this native dep?" is **no**.
+
+#### 2. If absolutely needed, use `optionalDependencies` + soft-degrade
+
+Place the dep under `optionalDependencies` (not `dependencies`) so install never hard-fails on it. Wrap every load site in a try/catch with a clear "feature unavailable" stderr hint:
+
+```typescript
+let nativeReader: NativeReader | null = null;
+try {
+  // Dynamic import keeps install-time failure away from the load barrel
+  nativeReader = (await import("better-sqlite3")).default as NativeReader;
+} catch {
+  process.stderr.write(
+    "[trellis] OpenCode 1.2+ SQLite session reader unavailable " +
+    "(better-sqlite3 not installed). Falling back to JSONL-only mode.\n"
+  );
+}
+
+if (nativeReader) {
+  // Use native path
+} else {
+  // Soft-degrade: degraded but functional output
+}
+```
+
+Cross-reference: future native-dep additions should mirror the soft-degrade pattern used by `commands/mem.ts:opencodeListSessions` (on the `feat/v0.6.0-beta` branch). When the native reader is unavailable, the function returns degraded but non-empty output rather than throwing.
+
+#### 3. Test on Windows + restricted network before shipping
+
+Even when a prebuild exists for the target platform, the GitHub releases CDN is unreliable from China and other constrained networks. The node-gyp source-build fallback then requires C compiler tooling that users typically don't have (MSVC on Windows, Xcode CLT on macOS, build-essential on Linux).
+
+Required pre-ship matrix for any native dep:
+
+| Environment | What to verify |
+|---|---|
+| Windows (clean VM, no VS Build Tools) + China-route network | `pnpm install` succeeds; CLI starts without the feature |
+| macOS (clean, no Xcode CLT) | Install succeeds; falls back gracefully |
+| Linux (Alpine / minimal Docker) | Install succeeds; musl vs glibc prebuild matches |
+
+#### 4. Decision framework
+
+A native dep is justified only when **both** are true:
+
+- The perf benefit is **dramatic** (orders of magnitude, not 2-3x) AND unreplaceable in pure JS / WASM.
+- Shell-out to a system tool (`sqlite3`, `ffmpeg`, etc.) is not viable — usually because the system tool isn't standard across target platforms or per-call dispatch overhead is prohibitive.
+
+If only one is true, pick a non-native alternative.
+
+#### 5. Alternative ladder (in preference order)
+
+| Option | Install risk | Perf | Notes |
+|---|---|---|---|
+| Pure JS | none | baseline | Always the first choice. Most CLI workloads are I/O-bound, not CPU-bound. |
+| WASM bundle | none (one-time bundle size cost ~1-2 MB) | ~1.5-3x slower than native, usually fine | E.g. `sql.js` for SQLite reads. Bundled at build time, no install-time fetch. |
+| Shell out to system CLI | low (Windows-PATH / "is it installed" risk) | per-call dispatch overhead | Zero install deps, but introduces "is sqlite3 / ffmpeg on PATH?" branching. Acceptable when the tool is broadly assumed present. |
+| `node:sqlite` etc. (Node built-ins) | none | native | Once these graduate from experimental in Node LTS, they become the preferred path. As of Node 22 LTS, `node:sqlite` is still experimental — track upstream. |
+| Native dep + `optionalDependencies` + soft-degrade | medium (still fails to install on a non-trivial fraction of Windows users) | native | Last resort. Only when steps 1-4 are ruled out and the soft-degrade path is genuinely usable. |
+
+#### 6. Audit checklist when adding any native dep
+
+Before merging a PR that adds a native dep:
+
+- [ ] Is it under `optionalDependencies` (not `dependencies`)?
+- [ ] Is every load site wrapped in try/catch with a stderr hint?
+- [ ] Does the soft-degrade path produce useful output, or does it just throw with a different message?
+- [ ] Has install been tested on a clean Windows VM without VS Build Tools, behind a China-route proxy?
+- [ ] Is the perf benefit measured (not assumed) and dramatic?
+- [ ] Has the WASM alternative been benchmarked and rejected with numbers?
+- [ ] Does the spec / PR description state which alternative ladder rungs were considered and why each was rejected?
+
+If any answer is "no", the dep doesn't ship.
 
 ---
 

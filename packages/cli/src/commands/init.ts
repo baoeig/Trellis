@@ -36,7 +36,11 @@ import {
   type ProjectType,
   type DetectedPackage,
 } from "../utils/project-detector.js";
-import { initializeHashes } from "../utils/template-hash.js";
+import { initializeHashes, removeHash } from "../utils/template-hash.js";
+import {
+  NATIVE_WORKFLOW_ID,
+  resolveWorkflowTemplate,
+} from "../utils/workflow-resolver.js";
 import {
   isCwdHomedir,
   homedirGuardMessage,
@@ -858,6 +862,16 @@ async function handleReinit(
       }
     }
 
+    // Opt-in Claude Code statusLine: only for platforms actually being added
+    // (already-configured ones are skipped in the loop below)
+    await maybePromptStatuslineOptIn(
+      options,
+      platformsToAdd.filter((tool) => {
+        const pid = resolveCliFlag(tool as CliFlag);
+        return !!pid && !configuredPlatforms.has(pid);
+      }),
+    );
+
     const reinitWritten = startRecordingWrites(cwd);
     try {
       for (const tool of platformsToAdd) {
@@ -873,7 +887,16 @@ async function handleReinit(
             console.log(
               chalk.blue(`📝 Configuring ${AI_TOOLS[platformId].name}...`),
             );
-            await configurePlatform(platformId, cwd);
+            await configurePlatform(platformId, cwd, {
+              withStatusline: options.withStatusline,
+            });
+            if (platformId === "claude-code" && options.withStatusline) {
+              console.log(
+                chalk.gray(
+                  "   ↳ Trellis statusLine installed (--with-statusline)",
+                ),
+              );
+            }
           }
         }
       }
@@ -952,6 +975,32 @@ async function handleReinit(
   return true;
 }
 
+/**
+ * Interactive opt-in for the Claude Code statusLine when `--with-statusline`
+ * was not passed. Fires only when Claude Code is among the platforms about to
+ * be configured and never in -y mode. Mutates `options.withStatusline` so the
+ * configurePlatform call sites and the install hint read the same answer; the
+ * `!== undefined` gate doubles as the asked-once-per-run guard.
+ */
+async function maybePromptStatuslineOptIn(
+  options: InitOptions,
+  toolKeys: string[],
+): Promise<void> {
+  if (options.yes || options.withStatusline !== undefined) return;
+  if (!toolKeys.includes(AI_TOOLS["claude-code"].cliFlag)) return;
+
+  const answer = await inquirer.prompt<{ withStatusline: boolean }>([
+    {
+      type: "confirm",
+      name: "withStatusline",
+      message:
+        "Install Trellis statusLine for Claude Code? (status bar: model, context, branch, rate limits)",
+      default: false,
+    },
+  ]);
+  options.withStatusline = answer.withStatusline;
+}
+
 interface InitOptions {
   cursor?: boolean;
   claude?: boolean;
@@ -961,13 +1010,22 @@ interface InitOptions {
   kiro?: boolean;
   gemini?: boolean;
   antigravity?: boolean;
+  devin?: boolean;
+  /** Deprecated alias for `devin` — Windsurf was renamed to Devin. */
   windsurf?: boolean;
   qoder?: boolean;
   codebuddy?: boolean;
   copilot?: boolean;
   droid?: boolean;
+  dsh?: boolean;
   pi?: boolean;
   reasonix?: boolean;
+  zcode?: boolean;
+  trae?: boolean;
+  omp?: boolean;
+  grok?: boolean;
+  kimi?: boolean;
+  snow?: boolean;
   yes?: boolean;
   user?: string;
   force?: boolean;
@@ -977,6 +1035,10 @@ interface InitOptions {
   append?: boolean;
   registry?: string;
   monorepo?: boolean;
+  /** Claude Code only: install the opt-in Trellis statusLine (--with-statusline) */
+  withStatusline?: boolean;
+  workflow?: string;
+  workflowSource?: string;
 }
 
 // Compile-time check: every CliFlag must be a key of InitOptions.
@@ -1045,6 +1107,14 @@ export async function init(options: InitOptions): Promise<void> {
   if (isCwdHomedir() && !homedirBypassEnabled()) {
     console.error(chalk.red(homedirGuardMessage("init")));
     process.exit(1);
+  }
+
+  // Deprecated alias: --windsurf → --devin (Windsurf was renamed to Devin).
+  // Normalize here too so programmatic callers (not just the CLI action) map
+  // correctly. The CLI action prints the deprecation notice.
+  if (options.windsurf) {
+    options.devin = true;
+    delete options.windsurf;
   }
 
   const cwd = process.cwd();
@@ -1402,6 +1472,9 @@ export async function init(options: InitOptions): Promise<void> {
     );
     return;
   }
+
+  // Opt-in Claude Code statusLine: confirm interactively when the flag wasn't passed
+  await maybePromptStatuslineOptIn(options, tools);
 
   // ==========================================================================
   // Template Selection (single-repo only; monorepo handles templates above)
@@ -1807,6 +1880,28 @@ export async function init(options: InitOptions): Promise<void> {
   }
 
   // ==========================================================================
+  // Resolve workflow template (default: native bundled)
+  // ==========================================================================
+
+  const workflowIdInput = options.workflow?.trim();
+  const workflowId =
+    workflowIdInput && workflowIdInput.length > 0
+      ? workflowIdInput
+      : NATIVE_WORKFLOW_ID;
+  let workflowMdOverride: string | undefined;
+  if (workflowId !== NATIVE_WORKFLOW_ID || options.workflowSource) {
+    const resolved = await resolveWorkflowTemplate(workflowId, {
+      source: options.workflowSource,
+    });
+    if (resolved.id !== NATIVE_WORKFLOW_ID) {
+      workflowMdOverride = resolved.content;
+      console.log(
+        chalk.blue(`🧭 Using workflow template: ${chalk.cyan(resolved.id)}`),
+      );
+    }
+  }
+
+  // ==========================================================================
   // Create Workflow Structure
   // ==========================================================================
 
@@ -1824,6 +1919,7 @@ export async function init(options: InitOptions): Promise<void> {
       skipSpecTemplates: useRemoteTemplate,
       packages: monorepoPackages,
       remoteSpecPackages,
+      workflowMdOverride,
     });
 
     // Write monorepo packages to config.yaml (non-destructive patch)
@@ -1843,7 +1939,14 @@ export async function init(options: InitOptions): Promise<void> {
         console.log(
           chalk.blue(`📝 Configuring ${AI_TOOLS[platformId].name}...`),
         );
-        await configurePlatform(platformId, cwd);
+        await configurePlatform(platformId, cwd, {
+          withStatusline: options.withStatusline,
+        });
+        if (platformId === "claude-code" && options.withStatusline) {
+          console.log(
+            chalk.gray("   ↳ Trellis statusLine installed (--with-statusline)"),
+          );
+        }
       }
     }
 
@@ -1881,6 +1984,14 @@ export async function init(options: InitOptions): Promise<void> {
     console.log(
       chalk.gray(`📋 Tracking ${hashedCount} template files for updates`),
     );
+  }
+
+  // Non-native workflow is user-managed local content. Drop the
+  // `.trellis/workflow.md` hash entry so `trellis update` classifies it as
+  // modified and does not silently restore native bytes. See design.md
+  // "Durable-state contract".
+  if (workflowMdOverride !== undefined && workflowId !== NATIVE_WORKFLOW_ID) {
+    removeHash(cwd, PATHS.WORKFLOW_GUIDE_FILE);
   }
 
   // Initialize developer identity (silent - no output)

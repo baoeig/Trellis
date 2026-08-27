@@ -17,6 +17,7 @@
  * (per the PRD: "全删"). The `.trellis/` tree is removed unconditionally.
  */
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -25,11 +26,7 @@ import inquirer from "inquirer";
 
 import { DIR_NAMES } from "../constants/paths.js";
 import { loadHashes } from "../utils/template-hash.js";
-import { cleanupEmptyDirs } from "./update.js";
-import {
-  ALL_MANAGED_DIRS,
-  getConfiguredPlatforms,
-} from "../configurators/index.js";
+import { getConfiguredPlatforms } from "../configurators/index.js";
 import { pruneOrphanManifestKeys } from "../utils/manifest-prune.js";
 import {
   isCwdHomedir,
@@ -37,169 +34,17 @@ import {
   homedirBypassEnabled,
 } from "../utils/cwd-guard.js";
 import {
-  scrubHooksJson,
-  scrubOpencodePackageJson,
-  scrubPiSettings,
-  scrubCodexConfigToml,
-  type ScrubResult,
-} from "../utils/uninstall-scrubbers.js";
+  buildManagedRemovalPlan,
+  executeManagedRemovalPlan,
+  type ManagedRemovalPlan,
+} from "../utils/managed-removal.js";
 
 export interface UninstallOptions {
   yes?: boolean;
   dryRun?: boolean;
 }
 
-/** A manifest-listed file we know is structured. */
-interface StructuredFileSpec {
-  /** Manifest path (POSIX). */
-  posixPath: string;
-  /** Short reason shown to the user under "Will be modified". */
-  reason: string;
-  /**
-   * Run the scrubber. `deletedPaths` is the full list of POSIX paths that this
-   * uninstall is going to delete; hooks-json scrubbers use it to identify
-   * trellis-managed `command` strings.
-   */
-  scrub: (content: string, deletedPaths: readonly string[]) => ScrubResult;
-}
-
-/**
- * Build the dispatch table for structured config scrubbers.
- *
- * Keys are POSIX paths exactly as they appear in `.template-hashes.json`.
- */
-function buildStructuredFileSpecs(): Map<string, StructuredFileSpec> {
-  const specs: StructuredFileSpec[] = [
-    // Nested hooks.{Event}.[].hooks.[] schema
-    ...(
-      [
-        ".claude/settings.json",
-        ".gemini/settings.json",
-        ".factory/settings.json",
-        ".codebuddy/settings.json",
-        ".qoder/settings.json",
-        ".codex/hooks.json",
-      ] as const
-    ).map(
-      (p): StructuredFileSpec => ({
-        posixPath: p,
-        reason: "Strip trellis hooks; preserve user fields",
-        scrub: (content, deletedPaths) =>
-          scrubHooksJson(content, deletedPaths, "nested"),
-      }),
-    ),
-    // Flat hooks.{Event}.[] schema
-    ...([".cursor/hooks.json", ".github/copilot/hooks.json"] as const).map(
-      (p): StructuredFileSpec => ({
-        posixPath: p,
-        reason: "Strip trellis hooks; preserve user fields",
-        scrub: (content, deletedPaths) =>
-          scrubHooksJson(content, deletedPaths, "flat"),
-      }),
-    ),
-    {
-      posixPath: ".opencode/package.json",
-      reason: "Remove @opencode-ai/plugin dep; preserve other deps",
-      scrub: (content) => scrubOpencodePackageJson(content),
-    },
-    {
-      posixPath: ".pi/settings.json",
-      reason:
-        "Strip trellis extension/skills/prompts entries; preserve user fields",
-      scrub: (content) => scrubPiSettings(content),
-    },
-    {
-      posixPath: ".codex/config.toml",
-      reason: "Remove trellis project_doc_fallback_filenames and notes",
-      scrub: (content) => scrubCodexConfigToml(content),
-    },
-  ];
-  const map = new Map<string, StructuredFileSpec>();
-  for (const spec of specs) {
-    map.set(spec.posixPath, spec);
-  }
-  return map;
-}
-
-/**
- * What the planner decides for each manifest-listed path.
- */
-interface PlannedDeletion {
-  posixPath: string;
-  /** Absolute filesystem path. */
-  absPath: string;
-  /** True when the file is missing on disk — nothing to delete. */
-  missing: boolean;
-}
-
-interface PlannedModification {
-  posixPath: string;
-  absPath: string;
-  reason: string;
-  /** Pre-computed scrub result. */
-  result: ScrubResult;
-}
-
-interface UninstallPlan {
-  deletions: PlannedDeletion[];
-  modifications: PlannedModification[];
-  /** Whether `.trellis/` directory itself will be removed. */
-  removeTrellisDir: boolean;
-}
-
-/**
- * Walk through the manifest and decide, for each entry, whether it is a plain
- * deletion or a structured modification (or fully-empty modification → still
- * a deletion at the end).
- */
-function buildPlan(cwd: string, hashes: Record<string, string>): UninstallPlan {
-  const structured = buildStructuredFileSpecs();
-  const allPosixPaths = Object.keys(hashes);
-
-  const deletions: PlannedDeletion[] = [];
-  const modifications: PlannedModification[] = [];
-
-  for (const posixPath of allPosixPaths) {
-    const absPath = path.join(cwd, ...posixPath.split("/"));
-    const spec = structured.get(posixPath);
-
-    if (!spec) {
-      deletions.push({
-        posixPath,
-        absPath,
-        missing: !fs.existsSync(absPath),
-      });
-      continue;
-    }
-
-    if (!fs.existsSync(absPath)) {
-      // Structured file expected by manifest is gone — nothing to do for it.
-      deletions.push({ posixPath, absPath, missing: true });
-      continue;
-    }
-
-    const content = fs.readFileSync(absPath, "utf-8");
-    const result = spec.scrub(content, allPosixPaths);
-
-    if (result.fullyEmpty) {
-      // Strip + delete: nothing meaningful left in the file.
-      deletions.push({ posixPath, absPath, missing: false });
-    } else {
-      modifications.push({
-        posixPath,
-        absPath,
-        reason: spec.reason,
-        result,
-      });
-    }
-  }
-
-  return {
-    deletions,
-    modifications,
-    removeTrellisDir: true,
-  };
-}
+type UninstallPlan = ManagedRemovalPlan;
 
 /**
  * Render the two-column uninstall plan to stdout.
@@ -222,7 +67,7 @@ function renderPlan(cwd: string, plan: UninstallPlan): void {
   if (plan.removeTrellisDir && fs.existsSync(trellisDir)) {
     console.log(
       `  ${chalk.red("-")} ${DIR_NAMES.WORKFLOW}/  ${chalk.gray(
-        "(entire directory, including tasks/runtime/config)",
+        "(entire directory — including your specs, task PRDs, journals, and memory)",
       )}`,
     );
   }
@@ -273,98 +118,42 @@ async function promptContinue(): Promise<boolean> {
 }
 
 /**
- * Execute the plan: write modifications, unlink deletions, remove `.trellis/`,
- * then prune empty managed directories.
- *
- * Returns counts for the summary.
+ * List uncommitted (modified, staged, or untracked) files under the
+ * user-data subdirectories of `.trellis/` — spec/, tasks/, workspace/ — which
+ * hold user-authored specs, task PRDs, and journals that `update.ts` marks as
+ * PROTECTED. Uninstall deletes the whole `.trellis/` tree with no backup, so
+ * these are surfaced before the destructive step. Returns `[]` when this is
+ * not a git repo or git is unavailable (nothing we can check).
  */
-function executePlan(
-  cwd: string,
-  plan: UninstallPlan,
-): { deletedFiles: number; modifiedFiles: number; deletedDirs: number } {
-  let deletedFiles = 0;
-  let modifiedFiles = 0;
-
-  // 1. Modifications first (preserve user data even if a later step fails).
-  for (const mod of plan.modifications) {
-    fs.writeFileSync(mod.absPath, mod.result.content);
-    modifiedFiles += 1;
+export function collectUncommittedTrellisData(cwd: string): string[] {
+  const w = DIR_NAMES.WORKFLOW;
+  const userDataDirs = [
+    `${w}/${DIR_NAMES.SPEC}`,
+    `${w}/${DIR_NAMES.TASKS}`,
+    `${w}/${DIR_NAMES.WORKSPACE}`,
+  ];
+  try {
+    const out = execFileSync(
+      "git",
+      ["-C", cwd, "status", "--porcelain", "--", ...userDataDirs],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return (
+      out
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        // Strip the 2-char status code, then keep the post-rename path if any.
+        .map((line) => line.replace(/^\S+\s+/, "").replace(/^.*\s->\s/, ""))
+    );
+  } catch {
+    return [];
   }
+}
 
-  // 2. Deletions (skip already-missing entries).
-  const deletedDirCandidates = new Set<string>();
-  for (const del of plan.deletions) {
-    if (del.missing) continue;
-    try {
-      fs.unlinkSync(del.absPath);
-      deletedFiles += 1;
-    } catch {
-      // Best-effort: a file that can't be unlinked (e.g. perm error) is
-      // surfaced via the summary mismatch, but we don't want to abort
-      // halfway through.
-      continue;
-    }
-    deletedDirCandidates.add(path.posix.dirname(del.posixPath));
-  }
-
-  // 3. Drop `.trellis/` entirely.
-  let deletedDirs = 0;
-  if (plan.removeTrellisDir) {
-    const trellisDir = path.join(cwd, DIR_NAMES.WORKFLOW);
-    if (fs.existsSync(trellisDir)) {
-      fs.rmSync(trellisDir, { recursive: true, force: true });
-      deletedDirs += 1;
-    }
-  }
-
-  // 4. Recursively clean up now-empty managed subdirectories (e.g. empty
-  // `.claude/hooks/` after every file inside was removed). This will not
-  // touch managed root dirs themselves (`.claude`, `.cursor`, etc.) — those
-  // are guarded by `isManagedRootDir` inside `cleanupEmptyDirs`.
-  for (const dirPosix of deletedDirCandidates) {
-    if (dirPosix === "." || dirPosix === "") continue;
-    cleanupEmptyDirs(cwd, dirPosix);
-  }
-
-  // 5. Final pass: remove any platform root dir (`.claude`, `.cursor`,
-  // `.agents/skills`, …) that is now empty. We deliberately handle this here
-  // — `cleanupEmptyDirs` refuses to touch managed root dirs because in normal
-  // `update` flow they must persist. During uninstall, an empty platform root
-  // has no purpose. `.trellis` is already gone (step 3), so we skip it.
-  // Process deepest-first so that nested managed dirs (e.g. `.agents/skills`)
-  // are removed before their parents (`.agents`).
-  const sortedManagedDirs = [...ALL_MANAGED_DIRS]
-    .filter((d) => d !== DIR_NAMES.WORKFLOW)
-    .sort((a, b) => b.split("/").length - a.split("/").length);
-  for (const managedDir of sortedManagedDirs) {
-    const abs = path.join(cwd, ...managedDir.split("/"));
-    if (!fs.existsSync(abs)) continue;
-    try {
-      const stat = fs.statSync(abs);
-      if (!stat.isDirectory()) continue;
-      if (fs.readdirSync(abs).length === 0) {
-        fs.rmdirSync(abs);
-        deletedDirs += 1;
-        // After removing a nested dir, its parent may now be empty. Walk up
-        // until we hit something non-empty or leave the cwd. We keep this
-        // loop bounded to managed-dir territory by checking that the next
-        // parent posix path is still a managed dir (or an ancestor of one).
-        let parentPosix = managedDir.split("/").slice(0, -1).join("/");
-        while (parentPosix.length > 0) {
-          const parentAbs = path.join(cwd, ...parentPosix.split("/"));
-          if (!fs.existsSync(parentAbs)) break;
-          if (fs.readdirSync(parentAbs).length !== 0) break;
-          fs.rmdirSync(parentAbs);
-          deletedDirs += 1;
-          parentPosix = parentPosix.split("/").slice(0, -1).join("/");
-        }
-      }
-    } catch {
-      // Best-effort cleanup; ignore permission/race errors.
-    }
-  }
-
-  return { deletedFiles, modifiedFiles, deletedDirs };
+/** Whether the uncommitted-data guard has been explicitly overridden. */
+function dirtyUninstallBypassEnabled(): boolean {
+  return process.env.TRELLIS_ALLOW_DIRTY_UNINSTALL === "1";
 }
 
 /**
@@ -432,12 +221,46 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
     );
   }
 
-  const plan = buildPlan(cwd, prunedHashes);
+  const plan = buildManagedRemovalPlan(cwd, prunedHashes);
   renderPlan(cwd, plan);
+
+  // .trellis/ holds user-authored specs, task PRDs, and journals that have no
+  // backup here. Surface any uncommitted such files before deleting the tree,
+  // and — for scripted `--yes` runs where nobody reads the warning — fail
+  // closed unless explicitly overridden.
+  const uncommitted = collectUncommittedTrellisData(cwd);
+  if (uncommitted.length > 0) {
+    console.warn(
+      chalk.red.bold(
+        `\n⚠ ${uncommitted.length} uncommitted file(s) under .trellis/ (spec/tasks/workspace) ` +
+          `will be permanently deleted with no backup:`,
+      ),
+    );
+    for (const p of uncommitted.slice(0, 20)) {
+      console.warn(chalk.red(`    ${p}`));
+    }
+    if (uncommitted.length > 20) {
+      console.warn(chalk.red(`    … and ${uncommitted.length - 20} more`));
+    }
+    console.warn(
+      chalk.yellow("Commit or stash them first if you want to keep them.\n"),
+    );
+  }
 
   if (options.dryRun) {
     console.log(chalk.gray("Dry run — no files were modified."));
     return;
+  }
+
+  if (uncommitted.length > 0 && options.yes && !dirtyUninstallBypassEnabled()) {
+    console.error(
+      chalk.red(
+        "Refusing to uninstall with --yes while .trellis/ has uncommitted user data " +
+          "(spec/tasks/workspace). Commit or stash it, re-run without --yes to confirm " +
+          "interactively, or set TRELLIS_ALLOW_DIRTY_UNINSTALL=1 to override.",
+      ),
+    );
+    process.exit(1);
   }
 
   if (!options.yes) {
@@ -464,7 +287,7 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
     }
   }
 
-  const summary = executePlan(cwd, plan);
+  const summary = executeManagedRemovalPlan(cwd, plan);
 
   console.log();
   console.log(

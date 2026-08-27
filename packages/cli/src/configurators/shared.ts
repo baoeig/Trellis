@@ -8,6 +8,20 @@
 import type { TemplateContext } from "../types/ai-tools.js";
 
 /**
+ * Per-platform configure options threaded from `trellis init` flags.
+ * Defined here (not in index.ts) so configurators can reference it without
+ * a circular import.
+ */
+export interface PlatformConfigureOptions {
+  /**
+   * Claude Code only: install the opt-in Trellis statusLine
+   * (`trellis init --with-statusline`). Off by default — see
+   * `configureClaude` in `claude.ts`.
+   */
+  withStatusline?: boolean;
+}
+
+/**
  * Module-level resolved Python command, set by the init flow after probing.
  *
  * Windows commonly has Python under one of: `python`, `python3`, `py -3` —
@@ -162,15 +176,15 @@ export function resolvePlaceholders(
  * Identical to {@link resolvePlaceholders} except that {@link CMD_REF} is
  * rendered in a platform-neutral form (`` `name` (Trellis command) ``)
  * instead of substituting a platform-specific prefix. This is the only
- * placeholder that varies between platforms in the 5 shared workflow skills
- * (`brainstorm`, `before-dev`, `check`, `break-loop`, `update-spec`), so
+ * placeholder that varies between platforms in the auto-triggered skill templates
+ * from `common/skills/`, so
  * neutralizing it makes the rendered SKILL.md files byte-identical regardless
  * of which Trellis configurator wrote them — eliminating the
  * "last-writer-wins" collision when both Codex and Gemini target
  * `.agents/skills/`.
  *
  * `{{CLI_FLAG}}`, `{{EXECUTOR_AI}}`, `{{USER_ACTION_LABEL}}`, conditionals,
- * and `{{PYTHON_CMD}}` are still resolved from the platform context. The 5
+ * and `{{PYTHON_CMD}}` are still resolved from the platform context. The
  * shared skills do not use those placeholders, so they remain platform-
  * neutral. Codex-only skill files (e.g. `trellis-continue/SKILL.md`,
  * `trellis-finish-work/SKILL.md` written via `resolveAllAsSkillsNeutral`) DO
@@ -196,8 +210,8 @@ export function resolvePlaceholdersNeutral(
   result = result.replace(RE_USER_ACTION_LABEL, context.userActionLabel);
   result = result.replace(RE_CLI_FLAG, context.cliFlag);
 
-  // Conditional blocks (resolved per platform — none of the 5 shared skills
-  // use conditionals, but Codex-only command-as-skill files might in future).
+  // Conditional blocks (resolved per platform — none of the auto-triggered
+  // shared skills use conditionals, but Codex-only command-as-skill files might in future).
   const flagValues: Record<(typeof CONDITIONAL_FLAGS)[number], boolean> = {
     AGENT_CAPABLE: context.agentCapable,
     HAS_HOOKS: context.hasHooks,
@@ -283,7 +297,49 @@ export function wrapWithCommandFrontmatter(
       `Missing command description for "${baseName}". Add it to COMMAND_DESCRIPTIONS in shared.ts.`,
     );
   }
-  return `---\nname: ${name}\ndescription: ${description}\n---\n\n${content}`;
+  // JSON.stringify produces a double-quoted YAML scalar, which is safe even
+  // when the description contains a colon (an unquoted plain scalar cannot
+  // contain ": " — some parsers reject it outright, e.g. Trae CLI's SlashCommand
+  // schema; others silently truncate at the second colon).
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(
+    description,
+  )}\n---\n\n${content}`;
+}
+
+/**
+ * Argument-hint values for commands that accept positional args.
+ * Used by OMP platform's YAML frontmatter.
+ */
+const COMMAND_ARGUMENT_HINTS: Record<string, string> = {
+  "finish-work": "[task-name]",
+};
+
+/**
+ * Wrap resolved command content with OMP-style YAML frontmatter.
+ * OMP uses `description` (required) + optional `argument-hint`.
+ * The leading `# Title` heading from the source template is stripped
+ * because OMP's frontmatter replaces its role.
+ */
+export function wrapWithOmpFrontmatter(name: string, content: string): string {
+  const baseName = name.replace(/^trellis-/, "");
+  const description = COMMAND_DESCRIPTIONS[baseName];
+  if (!description) {
+    throw new Error(
+      `Missing command description for "${baseName}". Add it to COMMAND_DESCRIPTIONS in shared.ts.`,
+    );
+  }
+  // Strip leading H1 + blank line from template body
+  const body = content.replace(/^# [^\n]+\n\n/, "");
+  const hint = COMMAND_ARGUMENT_HINTS[baseName];
+  // JSON.stringify produces a double-quoted YAML scalar, safe even when the
+  // description contains a colon (see wrapWithCommandFrontmatter).
+  const quotedDescription = JSON.stringify(description);
+  const frontmatter = hint
+    ? `---\ndescription: ${quotedDescription}\nargument-hint: ${JSON.stringify(
+        hint,
+      )}\n---`
+    : `---\ndescription: ${quotedDescription}\n---`;
+  return `${frontmatter}\n\n${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +354,10 @@ import {
   getCommandTemplates,
   getSkillTemplates,
 } from "../templates/common/index.js";
+import {
+  getSharedHookScriptsForPlatform,
+  type SharedHookPlatform,
+} from "../templates/shared-hooks/index.js";
 
 /** A resolved template ready to be written to disk. */
 export interface ResolvedTemplate {
@@ -315,16 +375,24 @@ export interface ResolvedSkillFile {
 /**
  * Filter command templates based on platform capabilities.
  *
- * `start.md` is only emitted for agent-less platforms (kilo, antigravity,
- * windsurf). On agent-capable platforms, the session-start hook / plugin
- * already injects the workflow overview, so a user-facing `start` command
- * would be redundant.
+ * `start.md` is stripped only on platforms that are BOTH `agentCapable` AND
+ * `hasHooks` — those platforms (Claude Code, Cursor, Kiro, Gemini, Qoder,
+ * CodeBuddy, Copilot, Droid, Pi) have a SessionStart-style hook that
+ * auto-injects the workflow overview, so a user-facing `start` would be
+ * redundant.
+ *
+ * `agentCapable && !hasHooks` platforms (Codex, ZCode, OpenCode, Reasonix, Grok)
+ * have no such hook (or use an out-of-band plugin), so they need the
+ * user-invocable `trellis-start` skill / `start.md` command as fallback.
+ * Snow is class-1 (`hasHooks: true`) with auto inject + project agents.
+ * Agent-less platforms (Kilo, Antigravity, Devin) also keep `start` since
+ * they rely entirely on user-triggered workflows.
  */
 function filterCommands(
   templates: CommonTemplate[],
   ctx: TemplateContext,
 ): CommonTemplate[] {
-  if (ctx.agentCapable) {
+  if (ctx.agentCapable && ctx.hasHooks) {
     return templates.filter((t) => t.name !== "start");
   }
   return templates;
@@ -365,7 +433,7 @@ export function resolveCommands(ctx: TemplateContext): ResolvedTemplate[] {
 }
 
 /**
- * Resolve only the 5 skill templates with trellis- prefix + SKILL.md frontmatter.
+ * Resolve the auto-triggered skill templates from `common/skills/` with trellis- prefix + SKILL.md frontmatter.
  * Used by "both" platforms for the auto-triggered skills.
  */
 export function resolveSkills(ctx: TemplateContext): ResolvedTemplate[] {
@@ -397,7 +465,7 @@ export function resolveSkillsNeutral(ctx: TemplateContext): ResolvedTemplate[] {
 
 /**
  * Same as {@link resolveAllAsSkills} but uses
- * {@link resolvePlaceholdersNeutral} for the 5 shared skills. The 2 command
+ * {@link resolvePlaceholdersNeutral} for the shared common skills. The 2 command
  * templates (continue, finish-work) folded into the skill set still resolve
  * `{{CLI_FLAG}}` / `{{PYTHON_CMD}}` per platform — only Codex writes those
  * files into `.agents/skills/`, so byte-identity isn't required there.
@@ -419,38 +487,6 @@ export function resolveAllAsSkillsNeutral(
 }
 
 /**
- * Codex needs a `trellis-start` skill in `.agents/skills/` so the
- * `<trellis-bootstrap>` notice from `inject-workflow-state.py` resolves
- * to an actual skill file (the bootstrap notice tells the AI to invoke
- * `$trellis-start` once on the first `no_task` turn — added in 0.5.5
- * after the Codex SessionStart hook was removed for de-recursion).
- *
- * Built from `common/commands/start.md` + skill frontmatter; renders
- * neutrally so init and update produce byte-identical output. Returns
- * `null` if the template is missing (defensive — should never happen).
- *
- * Used by both `configureCodex()` (init path, file write) and
- * `collectPlatformTemplates.codex` (update path, manifest map). Both
- * paths must agree, otherwise upgraded users miss the file (which broke
- * 0.4.x → 0.5.5/0.5.6 upgrades — see #247-style symptom: AI reports
- * "no .agents/skills/trellis-start/SKILL.md" because update only ran
- * `collectTemplates` and never wrote the file).
- */
-export function resolveCodexTrellisStartSkill(
-  ctx: TemplateContext,
-): ResolvedTemplate | null {
-  const startTemplate = getCommandTemplates().find((t) => t.name === "start");
-  if (!startTemplate) return null;
-  return {
-    name: "trellis-start",
-    content: wrapWithSkillFrontmatter(
-      "trellis-start",
-      resolvePlaceholdersNeutral(startTemplate.content, ctx),
-    ),
-  };
-}
-
-/**
  * Resolve multi-file built-in skills.
  *
  * Unlike workflow skills, bundled skills already contain their own SKILL.md
@@ -469,7 +505,7 @@ export function resolveBundledSkills(
 }
 
 // ---------------------------------------------------------------------------
-// Shared configurator write helpers
+// Shared collectors
 // ---------------------------------------------------------------------------
 
 /** Collect skill files under a target root for update hash tracking. */
@@ -488,67 +524,89 @@ export function collectSkillTemplates(
   return files;
 }
 
-/** Write skill directories from resolved templates and bundled skill files. */
-export async function writeSkills(
-  skillsRoot: string,
-  skills: { name: string; content: string }[],
-  bundledSkills: readonly ResolvedSkillFile[] = [],
-): Promise<void> {
-  ensureDir(skillsRoot);
-  for (const skill of skills) {
-    const skillDir = path.join(skillsRoot, skill.name);
-    ensureDir(skillDir);
-    await writeFile(
-      path.join(skillDir, "SKILL.md"),
-      replacePythonCommandLiterals(skill.content),
-    );
+// ---------------------------------------------------------------------------
+// Template maps — a platform's file set, described once
+//
+// `collect<Platform>Templates()` returns `Map<relPath, content>`: the single
+// description of what a platform installs. `trellis update` diffs that map and
+// `configure` writes it through `writeTemplateMap`. Nothing else enumerates a
+// platform's files — two descriptions that disagree is how `trellis update`
+// silently stops managing a file (manifests/0.5.7.json).
+// ---------------------------------------------------------------------------
+
+/** Apply the python3 → python rewrite to every entry of a template map. */
+export function renderTemplateMap(
+  files: Map<string, string>,
+): Map<string, string> {
+  const rendered = new Map<string, string>();
+  for (const [relPath, content] of files) {
+    rendered.set(relPath, replacePythonCommandLiterals(content));
   }
-  for (const skillFile of bundledSkills) {
-    const targetPath = path.join(skillsRoot, skillFile.relativePath);
-    ensureDir(path.dirname(targetPath));
-    await writeFile(
-      targetPath,
-      replacePythonCommandLiterals(skillFile.content),
-    );
+  return rendered;
+}
+
+/**
+ * Write a collected template map into `cwd`.
+ *
+ * Renders through {@link renderTemplateMap} first — the same rewrite
+ * `collectPlatformTemplates` applies on the update path — so a file's
+ * init-time bytes and its update-time expected bytes cannot drift.
+ */
+export async function writeTemplateMap(
+  cwd: string,
+  files: Map<string, string>,
+): Promise<void> {
+  for (const [relPath, content] of renderTemplateMap(files)) {
+    const absPath = path.join(cwd, ...relPath.split("/"));
+    ensureDir(path.dirname(absPath));
+    await writeFile(absPath, content);
   }
 }
 
-/** Write agent/droid definition files */
-export async function writeAgents(
-  agentsDir: string,
-  agents: { name: string; content: string }[],
-  ext = ".md",
-): Promise<void> {
-  ensureDir(agentsDir);
-  for (const agent of agents) {
-    await writeFile(
-      path.join(agentsDir, `${agent.name}${ext}`),
-      replacePythonCommandLiterals(agent.content),
-    );
-  }
-}
-
-/** Write the shared hook scripts that `platform` actually registers. */
-export async function writeSharedHooks(
-  hooksDir: string,
-  platform: import("../templates/shared-hooks/index.js").SharedHookPlatform,
-): Promise<void> {
-  const { getSharedHookScriptsForPlatform } =
-    await import("../templates/shared-hooks/index.js");
-  ensureDir(hooksDir);
+/**
+ * Collect the shared hook scripts that `platform` actually registers, keyed
+ * under `hooksPath`. Driven by SHARED_HOOKS_BY_PLATFORM so a platform's hook
+ * set is never restated per configurator.
+ */
+export function collectSharedHooks(
+  hooksPath: string,
+  platform: SharedHookPlatform,
+): Map<string, string> {
+  const files = new Map<string, string>();
   for (const hook of getSharedHookScriptsForPlatform(platform)) {
-    await writeFile(
-      path.join(hooksDir, hook.name),
-      replacePythonCommandLiterals(hook.content),
-    );
+    files.set(`${hooksPath}/${hook.name}`, hook.content);
   }
+  return files;
+}
+
+/** Collect commands + skills for "both" platforms (a commands directory plus
+ *  a skills root). */
+export function collectBothTemplates(
+  ctx: TemplateContext,
+  cmdPath: (name: string) => string,
+  skillRoot: string,
+  wrapCmd?: (filePath: string, content: string) => string,
+): Map<string, string> {
+  const files = new Map<string, string>();
+  for (const cmd of resolveCommands(ctx)) {
+    const filePath = cmdPath(cmd.name);
+    files.set(filePath, wrapCmd ? wrapCmd(filePath, cmd.content) : cmd.content);
+  }
+  for (const [filePath, content] of collectSkillTemplates(
+    skillRoot,
+    resolveSkills(ctx),
+    resolveBundledSkills(ctx),
+  )) {
+    files.set(filePath, content);
+  }
+  return files;
 }
 
 // ---------------------------------------------------------------------------
 // Pull-based sub-agent prelude (for class-2 platforms whose hook can't
 // inject sub-agent prompts: gemini, qoder, codex, copilot)
 //
-// Only implement & check need task-level context (prd + jsonl specs).
+// Only implement & check need task-level context (task artifacts + jsonl specs).
 // research is orthogonal: it searches the spec tree and doesn't depend on an
 // active task. Hook-based platforms mirror this (their `get_research_context`
 // injects a spec-tree overview, not prd/jsonl). We leave research untouched.
@@ -576,12 +634,12 @@ Try in order — stop at the first one that yields a task path:
 
 ### Step 2: Load task context from the resolved path
 
-1. Read the task's \`prd.md\` (requirements) and \`info.md\` if it exists (technical design).
-2. Read \`<task-path>/${jsonl}\` — JSONL list of dev spec files relevant to this agent.
-3. For each entry in the JSONL, Read its \`file\` path — these are the dev specs you must follow.
-   **Skip rows without a \`"file"\` field** (e.g. \`{"_example": "..."}\` seed rows left over from \`task.py create\` before the curator ran).
+1. Read \`<task-path>/${jsonl}\` — JSONL list of spec/research files relevant to this agent.
+2. For each entry in the JSONL, Read its \`file\` path — these are the specs and research notes you must follow.
+   **Skip rows without a \`"file"\` field** (e.g. \`{"_example": "..."}\` placeholder rows left over from an older \`task.py create\`).
+3. Read the task's \`prd.md\` (requirements), then \`design.md\` if present (technical design), then \`implement.md\` if present (execution plan).
 
-If \`${jsonl}\` has no curated entries (only a seed row, or the file is missing), fall back to: read \`prd.md\`, list available specs with \`python3 ./.trellis/scripts/get_context.py --mode packages\`, and pick the specs that match the task domain yourself. Do NOT block on the missing jsonl — proceed with prd-only context plus your spec judgment.
+If \`${jsonl}\` has no curated entries (empty, only a placeholder row, or the file is missing), fall back to: read the task artifacts, list available specs with \`python3 ./.trellis/scripts/get_context.py --mode packages\`, and pick the specs that match the task domain yourself. Do NOT block on the missing jsonl — lightweight tasks may be PRD-only, while complex tasks may also include \`design.md\` and \`implement.md\`.
 
 If the resolved task path has no \`prd.md\`, ask the user what to work on; do NOT proceed without context.
 
@@ -686,6 +744,14 @@ function mapLegacyToolToCopilot(tool: string): string[] {
       return ["search"];
     case "Bash":
       return ["execute"];
+    // Generic MCP wildcard — used by trellis-research to opt into "any MCP
+    // tool the user has configured" without locking the source template to a
+    // specific provider. Claude Code parses wildcards as glob-match-at-runtime
+    // (no silent agent-registration skip if nothing matches), so this is the
+    // safe default; explicit `mcp__exa__*` names would silent-skip the agent
+    // when the Exa MCP server is absent (#302).
+    case "mcp__*":
+      return ["web", "exa/*", "chrome-devtools/*"];
     case "mcp__exa__web_search_exa":
     case "mcp__exa__get_code_context_exa":
       return ["web", "exa/*"];

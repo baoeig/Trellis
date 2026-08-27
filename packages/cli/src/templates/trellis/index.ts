@@ -10,10 +10,13 @@
  *   │   ├── __init__.py
  *   │   ├── common/           # Shared utilities (Python)
  *   │   └── *.py              # Main scripts (Python)
+ *   ├── agents/                # Channel runtime agent definitions
+ *   │   └── *.md               # Loaded by `trellis channel spawn --agent <name>`
  *   ├── scripts-shell-archive/ # Archived shell scripts (for reference)
  *   ├── workflow.md           # Workflow guide
  *   ├── config.yaml            # Trellis configuration
- *   └── gitignore.txt         # .gitignore content
+ *   ├── gitignore.txt         # .gitignore content
+ *   └── gitattributes.txt     # project-root .gitattributes content
  */
 
 import { readFileSync } from "node:fs";
@@ -72,6 +75,14 @@ export const addSessionScript = readTemplate("scripts/add_session.py");
 export const workflowMdTemplate = readTemplate("workflow.md");
 export const configYamlTemplate = readTemplate("config.yaml");
 export const gitignoreTemplate = readTemplate("gitignore.txt");
+export const gitattributesTemplate = readTemplate("gitattributes.txt");
+
+// Channel runtime agent definitions (loaded by
+// `packages/cli/src/commands/channel/agent-loader.ts` from `.trellis/agents/`).
+// These are platform-agnostic Trellis runtime files dispatched at `trellis init`
+// and refreshed by `trellis update`.
+export const implementAgentTemplate = readTemplate("agents/implement.md");
+export const checkAgentTemplate = readTemplate("agents/check.md");
 
 /**
  * Get all script templates as a map of relative path to content
@@ -113,4 +124,19 @@ export function getAllScripts(): Map<string, string> {
   scripts.set("add_session.py", addSessionScript);
 
   return scripts;
+}
+
+/**
+ * Get all channel runtime agent definitions as a map of relative path
+ * (under `.trellis/agents/`) to content.
+ *
+ * Consumed by `trellis init` (to dispatch on first install) and by
+ * `trellis update` (to backfill missing files and surface conflicts on edited
+ * ones via the standard hash machinery).
+ */
+export function getAllAgents(): Map<string, string> {
+  const agents = new Map<string, string>();
+  agents.set("implement.md", implementAgentTemplate);
+  agents.set("check.md", checkAgentTemplate);
+  return agents;
 }

@@ -6,74 +6,39 @@
 
 ## Overview
 
-This project is a **TypeScript CLI tool** using ES modules. The source code follows a **dogfooding architecture** - Trellis uses its own configuration files (`.cursor/`, `.claude/`, `.trellis/`) as templates for new projects.
+This project is a **TypeScript monorepo** using ES modules. It publishes a CLI package (`@mindfoldhq/trellis`) and a reusable core package (`@mindfoldhq/trellis-core`). The source code also follows a **dogfooding architecture** - Trellis uses its own configuration files (`.cursor/`, `.claude/`, `.trellis/`) as templates for new projects.
 
 ---
 
 ## Directory Layout
 
 ```
-src/
-├── cli/                 # CLI entry point and argument parsing
-│   └── index.ts         # Main CLI entry (Commander.js setup)
-├── commands/            # Command implementations
-│   └── init.ts          # Each command in its own file
-├── configurators/       # Configuration generators
-│   ├── index.ts         # Platform registry (PLATFORM_FUNCTIONS, derived helpers)
-│   ├── shared.ts        # Shared utilities (resolvePlaceholders, writeSkills, writeAgents, writeSharedHooks)
-│   ├── antigravity.ts   # Antigravity configurator
-│   ├── claude.ts        # Claude Code configurator
-│   ├── codebuddy.ts     # CodeBuddy configurator
-│   ├── codex.ts         # Codex configurator
-│   ├── copilot.ts       # Copilot configurator
-│   ├── cursor.ts        # Cursor configurator
-│   ├── droid.ts         # Droid configurator
-│   ├── gemini.ts        # Gemini CLI configurator
-│   ├── kilo.ts          # Kilo configurator
-│   ├── kiro.ts          # Kiro configurator
-│   ├── opencode.ts      # OpenCode configurator
-│   ├── qoder.ts         # Qoder configurator
-│   ├── windsurf.ts      # Windsurf configurator
-│   └── workflow.ts      # Creates .trellis/ structure
-├── constants/           # Shared constants and paths
-│   └── paths.ts         # Path constants (centralized)
-├── templates/           # Template utilities and platform templates
-│   ├── template-utils.ts # createTemplateReader() factory — eliminates boilerplate
-│   ├── extract.ts       # Template extraction utilities (.trellis/ files)
-│   ├── common/          # Single source of truth for commands + skills
-│   │   ├── commands/    # Slash commands (start.md, finish-work.md)
-│   │   ├── skills/      # Auto-triggered skills (before-dev, brainstorm, check, break-loop, update-spec)
-│   │   └── index.ts     # getCommandTemplates(), getSkillTemplates()
-│   ├── shared-hooks/    # Platform-independent Python hook scripts
-│   │   ├── index.ts     # getSharedHookScripts()
-│   │   ├── session-start.py
-│   │   ├── inject-shell-session-context.py
-│   │   ├── inject-workflow-state.py
-│   │   └── inject-subagent-context.py
-│   ├── claude/          # Claude Code templates (agents, hooks, settings)
-│   ├── codebuddy/       # CodeBuddy templates (agents, settings)
-│   ├── codex/           # Codex templates (agents, hooks.json)
-│   ├── copilot/         # Copilot templates (prompts, hooks, hooks.json)
-│   ├── cursor/          # Cursor templates (agents, hooks.json)
-│   ├── droid/           # Droid templates (droids, settings)
-│   ├── gemini/          # Gemini templates (agents, settings)
-│   ├── kiro/            # Kiro templates (agents as JSON)
-│   ├── opencode/        # OpenCode templates (agents, plugin, lib)
-│   ├── qoder/           # Qoder templates (agents, settings)
-│   ├── markdown/        # Generic markdown templates
-│   │   ├── spec/        # Spec templates (*.md.txt)
-│   │   ├── agents.md    # Project root file template
-│   │   └── index.ts     # Template exports
-│   └── trellis/         # .trellis/ workflow templates (scripts, workflow.md)
-├── types/               # TypeScript type definitions
-│   └── ai-tools.ts      # AI tool types and registry
-├── utils/               # Shared utility functions
-│   ├── compare-versions.ts # Semver comparison with prerelease support
-│   ├── file-writer.ts   # File writing with conflict handling
-│   ├── project-detector.ts # Project type detection
-│   ├── template-fetcher.ts # Remote template download from GitHub
-│   └── template-hash.ts # Template hash tracking for update detection
-└── index.ts             # Package entry point (exports public API)
+packages/
+├── core/                # @mindfoldhq/trellis-core: reusable APIs
+│   ├── src/
+│   │   ├── channel/     # channel/thread storage, reducers, event protocol helpers
+│   │   ├── task/        # reusable task record helpers
+│   │   ├── testing/     # test helpers intended for package consumers
+│   │   └── index.ts     # package public API
+│   └── package.json     # explicit public exports
+└── cli/                 # @mindfoldhq/trellis: user-facing CLI
+    ├── src/
+    │   ├── cli/         # CLI entry point and argument parsing
+    │   │   └── index.ts # Main CLI entry (Commander.js setup)
+    │   ├── commands/    # Command implementations (one file or folder per command)
+    │   │   ├── init.ts
+    │   │   ├── update.ts
+    │   │   ├── uninstall.ts
+    │   │   ├── mem.ts
+    │   │   └── channel/ # Channel command renderers and CLI orchestration
+    │   ├── configurators/
+    │   ├── constants/
+    │   ├── templates/
+    │   ├── types/
+    │   ├── utils/
+    │   └── index.ts     # CLI package public API
+    ├── scripts/         # release, manifest, template copy, and verification scripts
+    └── package.json
 ```
 
 ### Dogfooding Directories (Project Root)
@@ -167,26 +132,48 @@ dist/
 
 | Layer | Directory | Responsibility |
 |-------|-----------|----------------|
-| CLI | `cli/` | Parse arguments, display help, call commands |
-| Commands | `commands/` | Implement CLI commands, orchestrate actions |
-| Configurators | `configurators/` | Copy/generate configuration for tools |
-| Templates | `templates/` | Extract template content, provide utilities |
-| Types | `types/` | TypeScript type definitions |
-| Utils | `utils/` | Reusable utility functions |
-| Constants | `constants/` | Shared constants (paths, names) |
+| Core | `packages/core/src/` | Reusable APIs, reducers, storage helpers, typed contracts |
+| CLI | `packages/cli/src/cli/` | Parse arguments, display help, call commands |
+| Commands | `packages/cli/src/commands/` | Implement CLI commands, orchestrate actions |
+| Configurators | `packages/cli/src/configurators/` | Copy/generate configuration for tools |
+| Templates | `packages/cli/src/templates/` | Extract template content, provide utilities |
+| Types | `packages/cli/src/types/` | CLI-specific TypeScript type definitions |
+| Utils | `packages/cli/src/utils/` | CLI-specific utility functions |
+| Constants | `packages/cli/src/constants/` | CLI constants (paths, names) |
+
+Shared logic belongs in `packages/core/src/` when it is useful outside terminal command rendering. Package boundary rules live in `trellis-core-sdk.md`.
 
 ### Configurator Pattern
 
-Configurators use `cpSync` for direct directory copy (dogfooding):
+A configurator exports **one** function: `collect<Platform>Templates()`,
+returning `Map<relPath, content>` — the single description of what that
+platform installs. `configure` is derived from it in the registry.
 
 ```typescript
 // configurators/cursor.ts
-export async function configureCursor(cwd: string): Promise<void> {
-  const sourcePath = getCursorSourcePath(); // dist/.cursor/ or .cursor/
-  const destPath = path.join(cwd, ".cursor");
-  cpSync(sourcePath, destPath, { recursive: true });
+export function collectCursorTemplates(): Map<string, string> {
+  const files = collectBothTemplates(
+    AI_TOOLS.cursor.templateContext,
+    (n) => `.cursor/commands/trellis-${n}.md`,
+    ".cursor/skills",
+  );
+  for (const agent of getAllAgents()) {
+    files.set(`.cursor/agents/${agent.name}.md`, agent.content);
+  }
+  for (const [k, v] of collectSharedHooks(".cursor/hooks", "cursor")) {
+    files.set(k, v);
+  }
+  files.set(".cursor/hooks.json", resolvePlaceholders(getHooksConfig()));
+  return files;
 }
+
+// configurators/index.ts
+cursor: fromTemplates(collectCursorTemplates),
 ```
+
+Full contract — map key/value rules, the three platforms that also need a
+`configure`, and the parity oracle — in `configurator-shared.md` →
+"Template maps".
 
 ### Template Extraction
 
@@ -418,7 +405,7 @@ Packages that received a remote template download (tracked via `remoteSpecPackag
 ### DO
 
 - Dogfood from project's own config files when possible
-- Use `cpSync` for copying entire directories
+- Describe a platform's file set exactly once, in its `collect<Platform>Templates()`
 - Keep generic templates in `src/templates/markdown/`
 - Use `.md.txt` or `.yaml.txt` for template files
 - Update dogfooding sources (`.cursor/`, `.claude/`, `.trellis/scripts/`) when making changes
@@ -430,6 +417,40 @@ Packages that received a remote template download (tracked via `remoteSpecPackag
 - Don't duplicate content between templates and dogfooding sources
 - Don't put project-specific content in generic templates
 - Don't use dogfooding for spec/ (users fill these in)
+
+---
+
+## Workspace Journal Merge Behavior (parallel sessions / worktrees)
+
+Parallel Trellis sessions (multiple git worktrees, or overlapping branches)
+regularly touch `.trellis/workspace/<developer>/` at the same time. The two
+files there behave differently on merge, and this is intentional:
+
+- **`journal-N.md` auto-resolves.** The project ships `.gitattributes` with
+  `.trellis/workspace/*/journal-*.md merge=union` (project root; both the
+  bundled template at `packages/cli/src/templates/trellis/gitattributes.txt`
+  and this repo's own dogfooded copy carry the rule). Each session only
+  appends a new session block, so a union merge keeps both sides' blocks with
+  no conflict markers — there is nothing semantically to resolve.
+- **`index.md` conflicts ARE EXPECTED and safe.** No merge attribute applies
+  to `index.md` — it is fully rewritten every session (current-status
+  counters, active-documents table, session-history table), so a union merge
+  would silently interleave two different rewrites of the same marker blocks
+  into structurally broken output. When two parallel worktrees/branches both
+  touch `index.md`, git's normal 3-way conflict is the correct outcome.
+  Picking either side to resolve it is safe: `index.md` is a **derived
+  summary**, not a source of truth. Real task state lives in each task's
+  `task.json`, not in the workspace index.
+
+`ensureGitattributes()` (`packages/cli/src/configurators/workflow.ts`) writes
+this rule additively — it is called from both `trellis init` and
+`trellis update`, never overwrites an existing project-root `.gitattributes`
+wholesale, and is a no-op if a `journal-*.md merge=union` rule already exists
+(user-authored or from a previous run).
+
+`add_session.py` prints a one-time-per-process warning (stderr, non-blocking)
+when it detects it is running inside a git worktree (not the main working
+tree) with `session_auto_commit` enabled, pointing back at this section.
 
 ---
 
@@ -456,9 +477,13 @@ import { downloadTemplate } from "giget";
 
 await downloadTemplate("gh:mindfold-ai/Trellis/marketplace/specs/electron-fullstack", {
   dir: destDir,
-  preferOffline: true,
 });
 ```
+
+**Note**: `downloadWithStrategy()` does not pass `preferOffline` — giget's
+default network-first behavior applies at all three call sites (skip,
+overwrite, append), so `init`/`update` always check the remote registry
+for new content instead of silently serving a stale cached tarball.
 
 ### Directory Conflict Strategy (skip/overwrite/append)
 
